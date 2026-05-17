@@ -1,0 +1,17 @@
+Retrieving project…
+Deploying apalamplmgmailcoms-projects/ecotrack-hsinchu
+Uploading [--------------------] (0.0B/77B)
+Uploading [====================] (77.0B/77B)
+Inspect: https://vercel.com/apalamplmgmailcoms-projects/ecotrack-hsinchu/7EEuobtSpc3UC3zQSLKuW1iKPtbX [2s]
+Production: https://ecotrack-hsinchu-qqn41ael0-apalamplmgmailcoms-projects.vercel.app [2s]
+https://ecotrack-hsinchu-qqn41ael0-apalamplmgmailcoms-projects.vercel.appBuilding...
+Building: Running build in Washington, D.C., USA (East) – iad1
+Building: Build machine configuration: 2 cores, 8 GB
+Building: Retrieving list of deployment files...
+Building: Previous build caches not available.
+Building: Previous build caches not available.
+Building: Downloading 19 deployment files...
+Building: Running "vercel build"
+Building: Vercel CLI 53.3.2
+Building: Installing dependencies...
+Error: No Output Directory named "public" found after the Build completed. Configure the Output Directory in your Project Settings. Alternatively, configure vercel.json#outputDirectory.

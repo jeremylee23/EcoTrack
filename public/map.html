@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>垃圾車即時追蹤</title>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f4f7f6;
+    }
+    #map {
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+    }
+    
+    .status-card {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90%;
+      max-width: 400px;
+      background: white;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 8px;
+    }
+    
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #333;
+    }
+    
+    .eta-badge {
+      background: #e0f2fe;
+      color: #0284c7;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+    .eta-badge.urgent {
+      background: #fee2e2;
+      color: #dc2626;
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+      70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+    }
+    
+    .info-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 14px;
+      color: #666;
+    }
+    
+    /* Custom Icon Styles */
+    .truck-icon {
+      background: #fff;
+      border: 3px solid #3b82f6;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 34px;
+      font-size: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+    .user-icon {
+      background: #fff;
+      border: 3px solid #10b981;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 24px;
+      font-size: 14px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+    .stop-icon {
+      background: #fff;
+      border: 3px solid #f59e0b;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 24px;
+      font-size: 14px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="map"></div>
+  
+  <div class="status-card" id="statusCard" style="display: none;">
+    <div class="title-row">
+      <div class="title">🚛 <span id="truckNo">垃圾車</span></div>
+      <div class="eta-badge" id="etaBadge">計算中...</div>
+    </div>
+    <div class="info-row">
+      <span>📍</span>
+      <span id="stopName">站點名稱</span>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  
+  <script>
+    // 1. Get query parameters
+    const params = new URLSearchParams(window.location.search);
+    const uLat = parseFloat(params.get('uLat'));
+    const uLng = parseFloat(params.get('uLng'));
+    const sLat = parseFloat(params.get('sLat'));
+    const sLng = parseFloat(params.get('sLng'));
+    const tLat = parseFloat(params.get('tLat'));
+    const tLng = parseFloat(params.get('tLng'));
+    const carNo = params.get('car') || '未知車牌';
+    const stopName = params.get('stop') || '清運點';
+    const eta = parseInt(params.get('eta')) || 0;
+
+    // 2. Setup map
+    const map = L.map('map', {
+      zoomControl: false // hide default zoom
+    });
+    
+    L.control.zoom({ position: 'topright' }).addTo(map);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors',
+      maxZoom: 19
+    }).addTo(map);
+
+    // 3. Define custom icons
+    const truckIcon = L.divIcon({
+      className: 'truck-icon',
+      html: '🚛',
+      iconSize: [40, 40],
+      iconAnchor: [20, 20]
+    });
+    
+    const userIcon = L.divIcon({
+      className: 'user-icon',
+      html: '🏠',
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+    
+    const stopIcon = L.divIcon({
+      className: 'stop-icon',
+      html: '🚩',
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+
+    // 4. Add markers
+    const bounds = L.latLngBounds();
+
+    if (!isNaN(uLat) && !isNaN(uLng)) {
+      L.marker([uLat, uLng], {icon: userIcon}).addTo(map).bindPopup('您的位置');
+      bounds.extend([uLat, uLng]);
+    }
+    
+    if (!isNaN(sLat) && !isNaN(sLng)) {
+      L.marker([sLat, sLng], {icon: stopIcon}).addTo(map).bindPopup(stopName);
+      bounds.extend([sLat, sLng]);
+    }
+    
+    if (!isNaN(tLat) && !isNaN(tLng)) {
+      L.marker([tLat, tLng], {icon: truckIcon}).addTo(map).bindPopup('垃圾車 (' + carNo + ')');
+      bounds.extend([tLat, tLng]);
+      
+      // Draw dotted line between truck and stop
+      if (!isNaN(sLat) && !isNaN(sLng)) {
+        L.polyline([[tLat, tLng], [sLat, sLng]], {
+          color: '#3b82f6',
+          weight: 4,
+          dashArray: '10, 10',
+          opacity: 0.6
+        }).addTo(map);
+      }
+    }
+
+    // Fit map to show all points with padding
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [50, 50] });
+    } else {
+      map.setView([24.8138, 120.9675], 13); // Default Hsinchu
+    }
+
+    // 5. Update UI Card
+    document.getElementById('statusCard').style.display = 'flex';
+    document.getElementById('truckNo').textContent = carNo;
+    document.getElementById('stopName').textContent = decodeURIComponent(stopName);
+    
+    const badge = document.getElementById('etaBadge');
+    if (eta <= 3) {
+      badge.textContent = '即將抵達';
+      badge.classList.add('urgent');
+    } else {
+      badge.textContent = `約 ${eta} 分鐘`;
+    }
+  </script>
+</body>
+</html>

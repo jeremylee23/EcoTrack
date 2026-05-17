@@ -1,0 +1,28 @@
+{
+  "name": "ecotrack",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "vercel dev",
+    "sync": "ts-node -e \"require('./src/services/truck.service').syncTrucksFromHccg().then(console.log)\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@line/bot-sdk": "^11.0.0",
+    "@supabase/supabase-js": "^2.105.4",
+    "@upstash/redis": "^1.38.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@vercel/node": "^5.8.1",
+    "pg": "^8.20.0",
+    "sharp": "^0.34.5",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  }
+}
