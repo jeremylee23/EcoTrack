@@ -207,6 +207,16 @@ export async function calculateEta(
     };
   }
 
+  // Check if truck GPS is stale
+  const lastUpdate = new Date(garbageTruck.updated_at);
+  const now = new Date();
+  const staleMinutes = Math.floor((now.getTime() - lastUpdate.getTime()) / 60000);
+  const isStale = staleMinutes > 3;
+  let staleWarning = "";
+  if (isStale) {
+    staleWarning = `\n⚠️ 垃圾車 GPS 已有 ${staleMinutes} 分鐘未移動或更新。`;
+  }
+
   // Step 3: compute intermediate stops between truck's current seq and target stop seq
   const garbageSeq = garbageTruck.heading_to_stop_sequence;
   const targetSeq = nearestStop.sequence_order;
@@ -246,7 +256,7 @@ export async function calculateEta(
     );
   }
 
-  const now = new Date();
+  // now was already declared for isStale check
   
   // Async log to database for garbage truck
   const db = getSupabaseClient();
@@ -283,7 +293,7 @@ export async function calculateEta(
   const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
   const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
                   `🕐 官方表定：${formattedTime}${avgStr}\n` +
-                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
+                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘${staleWarning}` +
                   (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 
   return {
@@ -306,7 +316,9 @@ export async function calculateEta(
     scheduledTime: formattedTime,
     historicalAvgTime: historicalAvg,
     message,
-  };
+    isStale,
+    staleMinutes
+  } as EtaResult & { isStale?: boolean; staleMinutes?: number };
 }
 
 async function getHistoricalAverage(routeId: string, stopId: number): Promise<string | undefined> {

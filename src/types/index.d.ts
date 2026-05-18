@@ -166,6 +166,8 @@ export interface EtaResult {
   message: string;
   scheduledTime?: string;
   historicalAvgTime?: string;
+  isStale?: boolean;
+  staleMinutes?: number;
 }
 
 // ── LINE Event types (minimal, extends @line/bot-sdk) ────────
