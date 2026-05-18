@@ -215,7 +215,29 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                     flex: 4
                   }
                 ]
-              }
+              },
+              ...(eta.historicalAvgTime ? [{
+                type: "box" as const,
+                layout: "baseline" as const,
+                spacing: "sm" as const,
+                contents: [
+                  {
+                    type: "text" as const,
+                    text: "歷史平均",
+                    color: "#aaaaaa",
+                    size: "sm" as const,
+                    flex: 1
+                  },
+                  {
+                    type: "text" as const,
+                    text: eta.historicalAvgTime,
+                    wrap: true,
+                    color: "#666666",
+                    size: "sm" as const,
+                    flex: 4
+                  }
+                ]
+              }] : [])
             ]
           },
           {

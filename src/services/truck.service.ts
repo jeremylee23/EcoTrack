@@ -115,6 +115,9 @@ export async function calculateEta(
 
   const garbageTruck = truckData.garbage;
   const recyclingTruck = truckData.recycling;
+  
+  const historicalAvg = await getHistoricalAverage(nearestStop.route_id, nearestStop.sequence_order);
+  const avgStr = historicalAvg ? `\n📊 歷史平均：約 ${historicalAvg}` : "";
 
   if (!garbageTruck && !recyclingTruck) {
     const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
@@ -122,7 +125,7 @@ export async function calculateEta(
       found: false,
       message: `⚠️ 目前無法取得該路線車輛的即時 GPS 訊號（可能尚未發車或收班）。\n\n` +
                `📍 離您最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 官方表定時間：${timeStr}\n\n` +
+               `🕐 官方表定時間：${timeStr}${avgStr}\n\n` +
                `💡 提示：您可以在接近表定時間時再次查詢！`,
     };
   }
@@ -139,8 +142,9 @@ export async function calculateEta(
       userLat,
       userLng,
       scheduledTime: timeStr,
+      historicalAvgTime: historicalAvg,
       message: `📍 找到最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 官方表定 (僅供參考)：${timeStr}\n` +
+               `🕐 官方表定 (僅供參考)：${timeStr}${avgStr}\n` +
                `⚠️ 目前無法取得垃圾車的即時 GPS 訊號（可能尚未出車或訊號中斷），請稍後再查詢。`,
     };
   }
@@ -220,7 +224,7 @@ export async function calculateEta(
   // Basic message fallback (will be overridden by Line Service Flex Message anyway)
   const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
   const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-                  `🕐 官方表定：${formattedTime}\n` +
+                  `🕐 官方表定：${formattedTime}${avgStr}\n` +
                   `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
                   (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 
@@ -242,8 +246,48 @@ export async function calculateEta(
     recyclingTruckLng: recyclingTruck?.lng,
     recyclingEtaMinutes,
     scheduledTime: formattedTime,
+    historicalAvgTime: historicalAvg,
     message,
   };
+}
+
+async function getHistoricalAverage(routeId: string, stopId: number): Promise<string | undefined> {
+  try {
+    const db = getSupabaseClient();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    
+    const { data, error } = await db
+      .from('eta_logs')
+      .select('predicted_arrival_time')
+      .eq('route_id', routeId)
+      .eq('stop_id', stopId)
+      .gte('created_at', thirtyDaysAgo);
+      
+    if (error || !data || data.length === 0) return undefined;
+    
+    let totalMinutes = 0;
+    let count = 0;
+    
+    for (const log of data) {
+      if (!log.predicted_arrival_time) continue;
+      const date = new Date(log.predicted_arrival_time);
+      const hours = (date.getUTCHours() + 8) % 24;
+      const minutes = date.getUTCMinutes();
+      totalMinutes += (hours * 60 + minutes);
+      count++;
+    }
+    
+    if (count === 0) return undefined;
+    
+    const avgTotalMinutes = Math.round(totalMinutes / count);
+    const avgHours = Math.floor(avgTotalMinutes / 60);
+    const avgMins = avgTotalMinutes % 60;
+    
+    return `${avgHours.toString().padStart(2, '0')}:${avgMins.toString().padStart(2, '0')}`;
+  } catch (e) {
+    console.error("[TruckService] Error calculating historical average:", e);
+    return undefined;
+  }
 }
 
 // ── HCCG API sync ────────────────────────────────────────────

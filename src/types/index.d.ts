@@ -165,6 +165,7 @@ export interface EtaResult {
   recyclingEtaMinutes?: number;
   message: string;
   scheduledTime?: string;
+  historicalAvgTime?: string;
 }
 
 // ── LINE Event types (minimal, extends @line/bot-sdk) ────────
