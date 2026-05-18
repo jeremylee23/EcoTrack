@@ -248,7 +248,7 @@ export function buildLocationConfirmMessage(address: string): TextMessage {
   return buildTextMessage(
     `📍 已記錄您的位置！\n` +
       `📌 地址：${address}\n\n` +
-      `✅ 未來我會根據此位置，在垃圾車接近時即時通知您。\n\n` +
+      `✅ 設定完成！未來點擊「查詢」時，我將為您計算離此地最近的垃圾車動態。\n\n` +
       `💡 您可以隨時傳送新的位置來更新設定。\n` +
       `🔍 查詢：點擊下方「查詢垃圾車 ETA」即可查看。`
   );
@@ -260,7 +260,7 @@ export function buildWelcomeMessage(): TextMessage {
       `🗺️ 使用方式：\n` +
       `1️⃣ 點擊下方「📍 設定住家位置」\n` +
       `2️⃣ 點擊下方「🚛 查詢垃圾車 ETA」\n\n` +
-      `📡 服務範圍：新竹市香山區\n` +
-      `⏰ 資料每 5 分鐘同步政府開放資料`
+      `📡 服務範圍：新竹市全市\n` +
+      `⚡ 即時連線：保證為您抓取當下的即時 GPS 座標`
   );
 }
