@@ -1,0 +1,17 @@
+name: Keep Vercel Serverless Alive
+
+on:
+  schedule:
+    # Run every 10 minutes to prevent Vercel Lambda from cold starting
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Vercel Health Endpoint
+        # Using curl to hit the health endpoint
+        run: |
+          curl -s -X GET https://ecotrack-hsinchu.vercel.app/api/health
+          echo "Ping successful!"
