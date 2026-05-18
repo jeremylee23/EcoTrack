@@ -95,27 +95,32 @@ export async function calculateEta(
     };
   }
 
-  // Step 2: Fetch real-time data from HCCG for ALL trucks to know which routes are currently active.
-  await syncTrucksFromHccg().catch(err => {
-    console.error("[TruckService] Failed to sync all trucks:", err);
-  });
+  // Step 2: Fast fetch of all active trucks (just in-memory, no Redis saves!) to avoid 15s latency
+  let activeRouteIds = new Set<string>();
+  try {
+    const url = `${config.hccg.baseUrl}/getCarLocation?rId=all`;
+    const response = await fetch(url, { headers: { Referer: config.hccg.referer }, signal: AbortSignal.timeout(3000) });
+    if (response.ok) {
+       const json = (await response.json()) as HccgApiResponse<HccgCarLocationData>;
+       if (json.statusCode === 1 && json.data) {
+          json.data.car.forEach(c => activeRouteIds.add(`${c.routeId}:${c.carType}`));
+       }
+    }
+  } catch (err) {
+    console.error("[TruckService] Failed to fast-fetch active trucks:", err);
+  }
 
   let nearestStop = nearestStops[0];
-  let truckData: { garbage: TruckLiveData | null, recycling: TruckLiveData | null } = { garbage: null, recycling: null };
+  let hasActiveTruck = false;
 
   const currentTime = new Date();
   const currentMinutes = ((currentTime.getUTCHours() + 8) % 24) * 60 + currentTime.getUTCMinutes();
 
-  // Find if any nearby stop has an active truck
+  // Find if any nearby stop has an active truck in memory
   for (const stop of nearestStops) {
-    const garbage = await getTruckLiveData(`${stop.route_id}:0`);
-    const recycling = await getTruckLiveData(`${stop.route_id}:1`);
+    const isGarbageActive = activeRouteIds.has(`${stop.route_id}:0`) || activeRouteIds.has(stop.route_id);
+    const isRecyclingActive = activeRouteIds.has(`${stop.route_id}:1`);
     
-    // Legacy fallback check just in case
-    const garbageLegacy = !garbage ? await getTruckLiveData(stop.route_id) : null;
-    
-    // Ensure the stop's schedule is somewhat relevant to the current time, 
-    // otherwise it might be a truck doing a completely different run.
     let isScheduleValid = true;
     if (stop.scheduled_time) {
       const [h, m] = stop.scheduled_time.split(':').map(Number);
@@ -123,15 +128,15 @@ export async function calculateEta(
       if (diff < -90) isScheduleValid = false; // more than 1.5 hours in the past
     }
     
-    if ((garbage || recycling || garbageLegacy) && isScheduleValid) {
+    if ((isGarbageActive || isRecyclingActive) && isScheduleValid) {
       nearestStop = stop;
-      truckData = { garbage: garbage || garbageLegacy, recycling };
+      hasActiveTruck = true;
       break;
     }
   }
 
   // If no active trucks found, fallback to time-based selection
-  if (!truckData.garbage && !truckData.recycling) {
+  if (!hasActiveTruck) {
     let bestUpcomingStop = nearestStops[0]; // fallback to geographically nearest
     let bestTimeDiff = Infinity;
     
@@ -149,6 +154,21 @@ export async function calculateEta(
       }
     }
     nearestStop = bestUpcomingStop;
+  }
+
+  // Step 3: Now fetch real-time data ONLY for the single chosen route and save it to Redis
+  let truckData = await syncSingleTruckFromHccg(nearestStop.route_id).catch(err => {
+    console.error("[TruckService] Failed to fetch single truck:", err);
+    return { garbage: null, recycling: null };
+  });
+
+  // Fallback to Redis if API is down
+  if (!truckData.garbage) {
+    truckData.garbage = await getTruckLiveData(`${nearestStop.route_id}:0`);
+    if (!truckData.garbage) truckData.garbage = await getTruckLiveData(nearestStop.route_id);
+  }
+  if (!truckData.recycling) {
+    truckData.recycling = await getTruckLiveData(`${nearestStop.route_id}:1`);
   }
 
   const garbageTruck = truckData.garbage;
