@@ -115,9 +115,11 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "即將抵達" : `約 ${eta.etaMinutes ?? "?"} 分`,
+                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
+                  ? "即將抵達" 
+                  : (eta.etaMinutes !== undefined ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)` : "未知"),
                 weight: "bold",
-                size: "lg",
+                size: "md",
                 color: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6",
                 margin: "md",
                 flex: 1
@@ -131,15 +133,34 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.recyclingEtaMinutes !== undefined ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `約 ${eta.recyclingEtaMinutes} 分`) : "無資料",
+                text: eta.recyclingEtaMinutes !== undefined 
+                  ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
+                  : "無資料",
                 weight: "bold",
-                size: "lg",
+                size: "md",
                 color: eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981",
                 margin: "md",
                 flex: 1
               }
             ]
           },
+          ...(eta.isStale ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#fef2f2",
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: `⚠️ 車輛 GPS 已停滯約 ${eta.staleMinutes} 分鐘，預估時間可能不準確。`,
+                color: "#dc2626",
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
           {
             type: "separator",
             margin: "md"
@@ -285,4 +306,13 @@ export function buildWelcomeMessage(): TextMessage {
       `📡 服務範圍：新竹市全市\n` +
       `⚡ 即時連線：保證為您抓取當下的即時 GPS 座標`
   );
+}
+
+function formatAbsoluteTime(etaMinutes: number): string {
+  const now = new Date();
+  // Using Taiwan time (UTC+8) to safely format
+  const targetTime = new Date(now.getTime() + etaMinutes * 60000 + (8 * 3600000));
+  const h = targetTime.getUTCHours().toString().padStart(2, "0");
+  const m = targetTime.getUTCMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
 }
