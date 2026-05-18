@@ -50,9 +50,9 @@ export const config = {
 
   // Domain constants
   hsinchu: {
-    // ETA calculation constants
-    avgSpeedKmh: 20,
-    stopDwellSeconds: 45,
+    // ETA calculation constants (tuned for city garbage trucks)
+    avgSpeedKmh: 10,
+    stopDwellSeconds: 60,
     // Max search radius for nearest stop (meters)
     nearestStopRadiusMeters: 1500,
     // Redis TTL for live truck data (seconds)

@@ -148,7 +148,7 @@ export async function calculateEta(
   let etaText: string;
   if (truckSeq > targetSeq) {
     etaText = "🚛 垃圾車已通過您附近的清運點，今日已清運完畢。";
-  } else if (etaMinutes <= 2) {
+  } else if (etaMinutes <= 3) {
     etaText = "🚨 垃圾車即將抵達！請立即準備垃圾下樓！";
   } else if (etaMinutes <= 5) {
     etaText = `⏰ 垃圾車大約 ${etaMinutes} 分鐘後抵達，請準備！`;
