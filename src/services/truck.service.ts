@@ -114,7 +114,16 @@ export async function calculateEta(
     // Legacy fallback check just in case
     const garbageLegacy = !garbage ? await getTruckLiveData(stop.route_id) : null;
     
-    if (garbage || recycling || garbageLegacy) {
+    // Ensure the stop's schedule is somewhat relevant to the current time, 
+    // otherwise it might be a truck doing a completely different run.
+    let isScheduleValid = true;
+    if (stop.scheduled_time) {
+      const [h, m] = stop.scheduled_time.split(':').map(Number);
+      const diff = (h * 60 + m) - currentMinutes;
+      if (diff < -90) isScheduleValid = false; // more than 1.5 hours in the past
+    }
+    
+    if ((garbage || recycling || garbageLegacy) && isScheduleValid) {
       nearestStop = stop;
       truckData = { garbage: garbage || garbageLegacy, recycling };
       break;
