@@ -21,9 +21,15 @@ async function run() {
   const points = await fetchAllStops();
   console.log(`Fetched ${points.length} points.`);
 
-  const client = new Client(
-    "postgresql://postgres:3z3g6ZVpeLOBFR8f@db.xsytkncomjcypfesxsbw.supabase.co:5432/postgres"
-  );
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env");
+  }
+
+  // Convert https://abc.supabase.co to postgres://postgres:password@db.abc.supabase.co:5432/postgres
+  const dbHost = new URL(process.env.SUPABASE_URL).hostname.replace(/^[^.]+/, 'db');
+  const connectionString = `postgresql://postgres:${process.env.SUPABASE_SERVICE_ROLE_KEY}@${dbHost}:5432/postgres`;
+
+  const client = new Client(connectionString);
 
   try {
     await client.connect();
