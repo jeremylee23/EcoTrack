@@ -78,6 +78,11 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
   params.append("tLat", eta.truckLat.toString());
   params.append("tLng", eta.truckLng.toString());
   if (eta.carNo) params.append("car", eta.carNo);
+  if (eta.recyclingTruckLat && eta.recyclingTruckLng) {
+    params.append("rLat", eta.recyclingTruckLat.toString());
+    params.append("rLng", eta.recyclingTruckLng.toString());
+  }
+  if (eta.recyclingCarNo) params.append("rCar", eta.recyclingCarNo);
   if (eta.nearestStopName || eta.nearestStopAddress) {
     params.append("stop", eta.nearestStopName || eta.nearestStopAddress || "");
   }
@@ -105,15 +110,31 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               {
                 type: "text",
                 text: "🚛",
-                size: "xxl",
+                size: "xl",
                 flex: 0
               },
               {
                 type: "text",
-                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 3 ? "即將抵達" : `約 ${eta.etaMinutes ?? "?"} 分鐘`,
+                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 3 ? "即將抵達" : `約 ${eta.etaMinutes ?? "?"} 分`,
                 weight: "bold",
-                size: "xl",
+                size: "lg",
                 color: eta.etaMinutes !== undefined && eta.etaMinutes <= 3 ? "#ef4444" : "#3b82f6",
+                margin: "md",
+                flex: 1
+              },
+              {
+                type: "text",
+                text: "♻️",
+                size: "xl",
+                flex: 0,
+                margin: "md"
+              },
+              {
+                type: "text",
+                text: eta.recyclingEtaMinutes !== undefined ? (eta.recyclingEtaMinutes <= 3 ? "即將抵達" : `約 ${eta.recyclingEtaMinutes} 分`) : "無資料",
+                weight: "bold",
+                size: "lg",
+                color: eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 3 ? "#ef4444" : "#10b981",
                 margin: "md",
                 flex: 1
               }
@@ -143,7 +164,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   },
                   {
                     type: "text",
-                    text: eta.carNo || "未知",
+                    text: `🚛 ${eta.carNo || "未知"} \n♻️ ${eta.recyclingCarNo || "未知"}`,
                     wrap: true,
                     color: "#666666",
                     size: "sm",

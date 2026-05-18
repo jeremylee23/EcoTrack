@@ -54,6 +54,7 @@ export interface TruckLiveData {
   route_name?: string;
   status?: string; // "0" = moving, "1" = completed
   direction?: string;
+  car_type?: string; // "0" = garbage, "1" = recycling
 }
 
 // ── HCCG (新竹市政府) API types ─────────────────────────────
@@ -152,9 +153,16 @@ export interface EtaResult {
   userLat?: number;
   userLng?: number;
   etaMinutes?: number;
+  // Core vehicle fields (garbage truck)
   carNo?: string;
   truckLat?: number;
   truckLng?: number;
+
+  // Secondary vehicle fields (recycling truck)
+  recyclingCarNo?: string;
+  recyclingTruckLat?: number;
+  recyclingTruckLng?: number;
+  recyclingEtaMinutes?: number;
   message: string;
   scheduledTime?: string;
 }

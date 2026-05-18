@@ -96,18 +96,26 @@ export async function calculateEta(
   }
 
   // Step 2: Fetch real-time data from HCCG directly for this specific route.
-  // This is extremely fast (O(1)) and guarantees < 30s latency without blocking.
   let truckData = await syncSingleTruckFromHccg(nearestStop.route_id).catch(err => {
     console.error("[TruckService] Failed to fetch single truck:", err);
-    return null;
+    return { garbage: null, recycling: null };
   });
 
   // Fallback to Redis if API is down
-  if (!truckData) {
-    truckData = await getTruckLiveData(nearestStop.route_id);
+  if (!truckData.garbage) {
+    truckData.garbage = await getTruckLiveData(`${nearestStop.route_id}:0`);
+    if (!truckData.garbage) {
+      // Legacy fallback
+      truckData.garbage = await getTruckLiveData(nearestStop.route_id);
+    }
+  }
+  if (!truckData.recycling) {
+    truckData.recycling = await getTruckLiveData(`${nearestStop.route_id}:1`);
   }
 
-  if (!truckData) {
+  const garbageTruck = truckData.garbage;
+
+  if (!garbageTruck) {
     return {
       found: true,
       routeId: nearestStop.route_id,
@@ -125,53 +133,83 @@ export async function calculateEta(
   }
 
   // Step 3: compute intermediate stops between truck's current seq and target stop seq
-  const truckSeq = truckData.heading_to_stop_sequence;
+  const garbageSeq = garbageTruck.heading_to_stop_sequence;
   const targetSeq = nearestStop.sequence_order;
-  const intermediateStops = Math.max(0, targetSeq - truckSeq - 1);
+  const garbageIntermediateStops = Math.max(0, targetSeq - garbageSeq - 1);
 
   // Step 4: compute straight-line distance truck → target stop
-  const distanceKm = haversineDistance(
-    truckData.lat,
-    truckData.lng,
+  const garbageDistKm = haversineDistance(
+    garbageTruck.lat,
+    garbageTruck.lng,
     nearestStop.lat,
     nearestStop.lng
   );
 
-  const etaMinutes = estimateEtaMinutes(
-    distanceKm,
-    intermediateStops,
+  const garbageEtaMinutes = estimateEtaMinutes(
+    garbageDistKm,
+    garbageIntermediateStops,
     config.hsinchu.avgSpeedKmh,
     config.hsinchu.stopDwellSeconds
   );
 
-  // Build human-readable message
-  let etaText: string;
-  if (truckSeq > targetSeq) {
-    etaText = "🚛 垃圾車已通過您附近的清運點，今日已清運完畢。";
-  } else if (etaMinutes <= 3) {
-    etaText = "🚨 垃圾車即將抵達！請立即準備垃圾下樓！";
-  } else if (etaMinutes <= 5) {
-    etaText = `⏰ 垃圾車大約 ${etaMinutes} 分鐘後抵達，請準備！`;
-  } else {
-    etaText = `⏳ 預估約 ${etaMinutes} 分鐘後抵達您附近。`;
+  // Calculate for recycling truck if exists
+  let recyclingEtaMinutes: number | undefined = undefined;
+  const recyclingTruck = truckData.recycling;
+  if (recyclingTruck) {
+    const recSeq = recyclingTruck.heading_to_stop_sequence;
+    const recIntermediate = Math.max(0, targetSeq - recSeq - 1);
+    const recDist = haversineDistance(
+      recyclingTruck.lat,
+      recyclingTruck.lng,
+      nearestStop.lat,
+      nearestStop.lng
+    );
+    recyclingEtaMinutes = estimateEtaMinutes(
+      recDist,
+      recIntermediate,
+      config.hsinchu.avgSpeedKmh,
+      config.hsinchu.stopDwellSeconds
+    );
   }
 
   const now = new Date();
-  const predictedArrivalTime = new Date(now.getTime() + etaMinutes * 60000).toISOString();
-
-  // Async log to database (fire and forget to not block the user response)
+  
+  // Async log to database for garbage truck
   const db = getSupabaseClient();
   db.from("eta_logs").insert({
     route_id: nearestStop.route_id,
     stop_id: nearestStop.sequence_order,
-    car_no: truckData.car_no,
+    car_no: garbageTruck.car_no,
     user_lat: userLat,
     user_lng: userLng,
-    estimated_eta_minutes: etaMinutes,
-    predicted_arrival_time: predictedArrivalTime
+    estimated_eta_minutes: garbageEtaMinutes,
+    predicted_arrival_time: new Date(now.getTime() + garbageEtaMinutes * 60000).toISOString(),
+    car_type: "0"
   }).then(({error}) => {
-    if (error) console.error("[TruckService] Failed to insert eta_log:", error.message);
+    if (error) console.error("[TruckService] Failed to insert garbage eta_log:", error.message);
   });
+
+  // Async log to database for recycling truck
+  if (recyclingTruck && recyclingEtaMinutes !== undefined) {
+    db.from("eta_logs").insert({
+      route_id: nearestStop.route_id,
+      stop_id: nearestStop.sequence_order,
+      car_no: recyclingTruck.car_no,
+      user_lat: userLat,
+      user_lng: userLng,
+      estimated_eta_minutes: recyclingEtaMinutes,
+      predicted_arrival_time: new Date(now.getTime() + recyclingEtaMinutes * 60000).toISOString(),
+      car_type: "1"
+    }).then(({error}) => {
+      if (error) console.error("[TruckService] Failed to insert recycling eta_log:", error.message);
+    });
+  }
+
+  // Basic message fallback (will be overridden by Line Service Flex Message anyway)
+  const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
+                  `🕐 表定時間：${nearestStop.scheduled_time ?? "未知"}\n` +
+                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
+                  (recyclingEtaMinutes ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 
   return {
     found: true,
@@ -182,16 +220,16 @@ export async function calculateEta(
     stopLng: nearestStop.lng,
     userLat,
     userLng,
-    etaMinutes,
-    carNo: truckData.car_no,
-    truckLat: truckData.lat,
-    truckLng: truckData.lng,
+    etaMinutes: garbageEtaMinutes,
+    carNo: garbageTruck.car_no,
+    truckLat: garbageTruck.lat,
+    truckLng: garbageTruck.lng,
+    recyclingCarNo: recyclingTruck?.car_no,
+    recyclingTruckLat: recyclingTruck?.lat,
+    recyclingTruckLng: recyclingTruck?.lng,
+    recyclingEtaMinutes,
     scheduledTime: nearestStop.scheduled_time ?? undefined,
-    message:
-      `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-      `🕐 表定時間：${nearestStop.scheduled_time ?? "未知"}\n` +
-      `🚛 車牌：${truckData.car_no ?? "未知"}\n` +
-      etaText,
+    message,
   };
 }
 
@@ -202,7 +240,8 @@ export async function calculateEta(
  * This is incredibly fast and avoids the heavy lifting of parsing all 130+ trucks.
  * Saves to Redis and resolves ETA logs asynchronously.
  */
-export async function syncSingleTruckFromHccg(routeId: string): Promise<TruckLiveData | null> {
+export async function syncSingleTruckFromHccg(routeId: string): Promise<{ garbage: TruckLiveData | null, recycling: TruckLiveData | null }> {
+  const result = { garbage: null as TruckLiveData | null, recycling: null as TruckLiveData | null };
   const url = `${config.hccg.baseUrl}/getCarLocation?rId=${routeId}`;
 
   const response = await fetch(url, {
@@ -213,49 +252,59 @@ export async function syncSingleTruckFromHccg(routeId: string): Promise<TruckLiv
     signal: AbortSignal.timeout(5_000), // very short timeout for UX
   });
 
-  if (!response.ok) return null;
+  if (!response.ok) return result;
 
   const json = (await response.json()) as HccgApiResponse<HccgCarLocationData>;
-  if (json.statusCode !== 1 || !json.data || json.data.car.length === 0) return null;
+  if (json.statusCode !== 1 || !json.data || json.data.car.length === 0) return result;
 
-  const car = json.data.car[0];
-  const lat = parseFloat(car.lat);
-  const lng = parseFloat(car.lon);
+  const db = getSupabaseClient();
 
-  if (!isValidCoordinate(lat, lng)) return null;
+  for (const car of json.data.car) {
+    const lat = parseFloat(car.lat);
+    const lng = parseFloat(car.lon);
 
-  const liveData: TruckLiveData = {
-    lat,
-    lng,
-    speed: 0,
-    updated_at: new Date(
-      car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
-    ).toISOString(),
-    heading_to_stop_sequence: parseInt(car.seq, 10) || 0,
-    car_no: car.carNo,
-    route_name: car.routeName,
-    status: car.carStatus,
-    direction: car.direction,
-  };
+    if (!isValidCoordinate(lat, lng)) continue;
 
-  // Async save to Redis
-  setTruckLiveData(car.routeId, liveData).catch(console.error);
+    const liveData: TruckLiveData = {
+      lat,
+      lng,
+      speed: 0,
+      updated_at: new Date(
+        car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
+      ).toISOString(),
+      heading_to_stop_sequence: parseInt(car.seq, 10) || 0,
+      car_no: car.carNo,
+      route_name: car.routeName,
+      status: car.carStatus,
+      direction: car.direction,
+      car_type: car.carType,
+    };
 
-  // Async resolve ETA logs
-  const currentSeq = parseInt(car.seq, 10);
-  if (!isNaN(currentSeq) && currentSeq > 0) {
-    const db = getSupabaseClient();
-    db.from("eta_logs")
-      .update({ actual_arrival_time: liveData.updated_at })
-      .eq("route_id", car.routeId)
-      .is("actual_arrival_time", null)
-      .lte("stop_id", currentSeq)
-      .then(({error}) => {
-        if (error) console.error("[TruckService] Failed to resolve eta_logs:", error.message);
-      });
+    if (car.carType === "0") {
+      result.garbage = liveData;
+    } else if (car.carType === "1") {
+      result.recycling = liveData;
+    }
+
+    // Async save to Redis (key separated by car_type)
+    setTruckLiveData(`${car.routeId}:${car.carType}`, liveData).catch(console.error);
+
+    // Async resolve ETA logs
+    const currentSeq = parseInt(car.seq, 10);
+    if (!isNaN(currentSeq) && currentSeq > 0) {
+      db.from("eta_logs")
+        .update({ actual_arrival_time: liveData.updated_at })
+        .eq("route_id", car.routeId)
+        .eq("car_type", car.carType)
+        .is("actual_arrival_time", null)
+        .lte("stop_id", currentSeq)
+        .then(({error}) => {
+          if (error) console.error("[TruckService] Failed to resolve eta_logs:", error.message);
+        });
+    }
   }
 
-  return liveData;
+  return result;
 }
 
 /**
@@ -295,11 +344,11 @@ export async function syncTrucksFromHccg(): Promise<{
   const previousCache = new Map<string, TruckLiveData>();
 
   // Pre-load existing Redis data for teleport check
-  const routeIds = [...new Set(cars.map((c) => c.routeId))];
+  const carKeys = cars.map((c) => `${c.routeId}:${c.carType}`);
   await Promise.all(
-    routeIds.map(async (rid) => {
-      const existing = await getTruckLiveData(rid);
-      if (existing) previousCache.set(rid, existing);
+    carKeys.map(async (key) => {
+      const existing = await getTruckLiveData(key);
+      if (existing) previousCache.set(key, existing);
     })
   );
 
@@ -319,7 +368,8 @@ export async function syncTrucksFromHccg(): Promise<{
       }
 
       // Guard 2: teleport detection
-      const prev = previousCache.get(car.routeId);
+      const cacheKey = `${car.routeId}:${car.carType}`;
+      const prev = previousCache.get(cacheKey);
       if (prev) {
         const prevTime = prev.updated_at;
         // Parse HCCG time format: "YYYY/MM/DD HH:mm:ss"
@@ -348,9 +398,10 @@ export async function syncTrucksFromHccg(): Promise<{
         route_name: car.routeName,
         status: car.carStatus,
         direction: car.direction,
+        car_type: car.carType,
       };
 
-      await setTruckLiveData(car.routeId, liveData);
+      await setTruckLiveData(cacheKey, liveData);
       
       // Resolve pending ETA logs
       // If the truck's current sequence is > logged stop sequence, it means it has passed the stop.
@@ -367,6 +418,7 @@ export async function syncTrucksFromHccg(): Promise<{
         db.from("eta_logs")
           .update({ actual_arrival_time: updateTime })
           .eq("route_id", car.routeId)
+          .eq("car_type", car.carType)
           .is("actual_arrival_time", null)
           .lte("stop_id", currentSeq)
           .then(({error}) => {

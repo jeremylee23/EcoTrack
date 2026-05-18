@@ -108,6 +108,15 @@
       font-size: 14px;
       box-shadow: 0 2px 5px rgba(0,0,0,0.3);
     }
+    .recycle-icon {
+      background: #fff;
+      border: 3px solid #10b981;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 34px;
+      font-size: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
   </style>
 </head>
 <body>
@@ -137,7 +146,10 @@
     const sLng = parseFloat(params.get('sLng'));
     const tLat = parseFloat(params.get('tLat'));
     const tLng = parseFloat(params.get('tLng'));
+    const rLat = parseFloat(params.get('rLat'));
+    const rLng = parseFloat(params.get('rLng'));
     const carNo = params.get('car') || '未知車牌';
+    const rCarNo = params.get('rCar') || '';
     const stopName = params.get('stop') || '清運點';
     const eta = parseInt(params.get('eta')) || 0;
 
@@ -157,6 +169,13 @@
     const truckIcon = L.divIcon({
       className: 'truck-icon',
       html: '🚛',
+      iconSize: [40, 40],
+      iconAnchor: [20, 20]
+    });
+    
+    const recycleIcon = L.divIcon({
+      className: 'recycle-icon',
+      html: '♻️',
       iconSize: [40, 40],
       iconAnchor: [20, 20]
     });
@@ -203,6 +222,21 @@
       }
     }
 
+    if (!isNaN(rLat) && !isNaN(rLng)) {
+      L.marker([rLat, rLng], {icon: recycleIcon}).addTo(map).bindPopup('回收車 (' + rCarNo + ')');
+      bounds.extend([rLat, rLng]);
+      
+      // Draw dotted line for recycling truck
+      if (!isNaN(sLat) && !isNaN(sLng)) {
+        L.polyline([[rLat, rLng], [sLat, sLng]], {
+          color: '#10b981',
+          weight: 4,
+          dashArray: '10, 10',
+          opacity: 0.6
+        }).addTo(map);
+      }
+    }
+
     // Fit map to show all points with padding
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [50, 50] });
@@ -212,7 +246,9 @@
 
     // 5. Update UI Card
     document.getElementById('statusCard').style.display = 'flex';
-    document.getElementById('truckNo').textContent = carNo;
+    let truckTitle = carNo;
+    if (rCarNo) truckTitle += ` | ♻️ ${rCarNo}`;
+    document.getElementById('truckNo').textContent = truckTitle;
     document.getElementById('stopName').textContent = decodeURIComponent(stopName);
     
     const badge = document.getElementById('etaBadge');
