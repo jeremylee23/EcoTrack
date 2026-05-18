@@ -140,7 +140,7 @@ export async function calculateEta(
       userLng,
       scheduledTime: timeStr,
       message: `📍 找到最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 表定時間：${timeStr}\n` +
+               `🕐 官方表定 (僅供參考)：${timeStr}\n` +
                `⚠️ 目前無法取得垃圾車的即時 GPS 訊號（可能尚未出車或訊號中斷），請稍後再查詢。`,
     };
   }
@@ -220,7 +220,7 @@ export async function calculateEta(
   // Basic message fallback (will be overridden by Line Service Flex Message anyway)
   const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
   const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-                  `🕐 表定時間：${formattedTime}\n` +
+                  `🕐 官方表定：${formattedTime}\n` +
                   `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
                   (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 

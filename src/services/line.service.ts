@@ -201,7 +201,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 contents: [
                   {
                     type: "text",
-                    text: "表定",
+                    text: "官方表定",
                     color: "#aaaaaa",
                     size: "sm",
                     flex: 1
@@ -248,7 +248,7 @@ export function buildLocationConfirmMessage(address: string): TextMessage {
   return buildTextMessage(
     `📍 已記錄您的位置！\n` +
       `📌 地址：${address}\n\n` +
-      `✅ 設定完成！未來點擊「查詢」時，我將為您計算離此地最近的垃圾車動態。\n\n` +
+      `✅ 設定完成！未來點擊查詢時，我將為您計算離此地最近的垃圾車動態。\n\n` +
       `💡 您可以隨時傳送新的位置來更新設定。\n` +
       `🔍 查詢：點擊下方「查詢垃圾車 ETA」即可查看。`
   );
