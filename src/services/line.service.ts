@@ -115,10 +115,10 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 3 ? "即將抵達" : `約 ${eta.etaMinutes ?? "?"} 分`,
+                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "即將抵達" : `約 ${eta.etaMinutes ?? "?"} 分`,
                 weight: "bold",
                 size: "lg",
-                color: eta.etaMinutes !== undefined && eta.etaMinutes <= 3 ? "#ef4444" : "#3b82f6",
+                color: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6",
                 margin: "md",
                 flex: 1
               },
@@ -131,10 +131,10 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.recyclingEtaMinutes !== undefined ? (eta.recyclingEtaMinutes <= 3 ? "即將抵達" : `約 ${eta.recyclingEtaMinutes} 分`) : "無資料",
+                text: eta.recyclingEtaMinutes !== undefined ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `約 ${eta.recyclingEtaMinutes} 分`) : "無資料",
                 weight: "bold",
                 size: "lg",
-                color: eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 3 ? "#ef4444" : "#10b981",
+                color: eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981",
                 margin: "md",
                 flex: 1
               }

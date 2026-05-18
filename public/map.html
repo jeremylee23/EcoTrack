@@ -252,7 +252,7 @@
     document.getElementById('stopName').textContent = decodeURIComponent(stopName);
     
     const badge = document.getElementById('etaBadge');
-    if (eta <= 3) {
+    if (eta <= 1) {
       badge.textContent = '即將抵達';
       badge.classList.add('urgent');
     } else {
