@@ -167,7 +167,6 @@ export async function calculateEta(
 
   // Calculate for recycling truck if exists
   let recyclingEtaMinutes: number | undefined = undefined;
-  const recyclingTruck = truckData.recycling;
   if (recyclingTruck) {
     const recSeq = recyclingTruck.heading_to_stop_sequence;
     const recIntermediate = Math.max(0, targetSeq - recSeq - 1);
