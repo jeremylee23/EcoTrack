@@ -79,7 +79,7 @@ export async function getNearestStop(
   lat: number,
   lng: number,
   radiusMeters?: number
-): Promise<NearestStopResult | null> {
+): Promise<NearestStopResult[]> {
   const db = getSupabaseClient();
   const radius = radiusMeters ?? config.hsinchu.nearestStopRadiusMeters;
 
@@ -93,10 +93,9 @@ export async function getNearestStop(
     throw new Error(`[UserService] getNearestStop failed: ${error.message}`);
   }
 
-  if (!data || (Array.isArray(data) && data.length === 0)) {
-    return null;
+  if (!data || !Array.isArray(data) || data.length === 0) {
+    return [];
   }
 
-  const result = Array.isArray(data) ? data[0] : data;
-  return result as NearestStopResult;
+  return data as NearestStopResult[];
 }

@@ -128,27 +128,28 @@ DECLARE
 BEGIN
   v_user_point := ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326);
 
-  SELECT jsonb_build_object(
-    'id',             rs.id::text,
-    'route_id',       rs.route_id,
-    'sequence_order', rs.sequence_order,
-    'scheduled_time', rs.scheduled_time::text,
-    'point_name',     rs.point_name,
-    'address',        rs.address,
-    'lat',            rs.lat,
-    'lng',            rs.lng,
-    'distance_meters', ST_Distance(rs.location::geography, v_user_point::geography)
+  SELECT jsonb_agg(
+    jsonb_build_object(
+      'id',             rs.id::text,
+      'route_id',       rs.route_id,
+      'sequence_order', rs.sequence_order,
+      'scheduled_time', rs.scheduled_time::text,
+      'point_name',     rs.point_name,
+      'address',        rs.address,
+      'lat',            rs.lat,
+      'lng',            rs.lng,
+      'distance_meters', rs.distance_meters
+    )
   )
   INTO v_result
-  FROM public.route_stops rs
-  JOIN public.truck_routes tr ON tr.id = rs.route_id
-  WHERE ST_DWithin(
-    rs.location::geography,
-    v_user_point::geography,
-    p_radius_meters
-  )
-  ORDER BY rs.location::geography <-> v_user_point::geography
-  LIMIT 1;
+  FROM (
+    SELECT id, route_id, sequence_order, scheduled_time, point_name, address, lat, lng,
+           ST_Distance(location::geography, v_user_point::geography) as distance_meters
+    FROM public.route_stops
+    WHERE ST_DWithin(location::geography, v_user_point::geography, p_radius_meters)
+    ORDER BY location::geography <-> v_user_point::geography
+    LIMIT 20
+  ) rs;
 
   RETURN v_result;
 END;

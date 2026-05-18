@@ -84,10 +84,10 @@ export async function calculateEta(
   userLat: number,
   userLng: number
 ): Promise<EtaResult> {
-  // Step 1: nearest stop from PostGIS
-  const nearestStop = await getNearestStop(userLat, userLng);
+  // Step 1: nearest stops from PostGIS (returns up to 20)
+  const nearestStops = await getNearestStop(userLat, userLng);
 
-  if (!nearestStop) {
+  if (!nearestStops || nearestStops.length === 0) {
     return {
       found: false,
       message:
@@ -95,22 +95,51 @@ export async function calculateEta(
     };
   }
 
-  // Step 2: Fetch real-time data from HCCG directly for this specific route.
-  let truckData = await syncSingleTruckFromHccg(nearestStop.route_id).catch(err => {
-    console.error("[TruckService] Failed to fetch single truck:", err);
-    return { garbage: null, recycling: null };
+  // Step 2: Fetch real-time data from HCCG for ALL trucks to know which routes are currently active.
+  await syncTrucksFromHccg().catch(err => {
+    console.error("[TruckService] Failed to sync all trucks:", err);
   });
 
-  // Fallback to Redis if API is down
-  if (!truckData.garbage) {
-    truckData.garbage = await getTruckLiveData(`${nearestStop.route_id}:0`);
-    if (!truckData.garbage) {
-      // Legacy fallback
-      truckData.garbage = await getTruckLiveData(nearestStop.route_id);
+  let nearestStop = nearestStops[0];
+  let truckData: { garbage: TruckLiveData | null, recycling: TruckLiveData | null } = { garbage: null, recycling: null };
+
+  const currentTime = new Date();
+  const currentMinutes = ((currentTime.getUTCHours() + 8) % 24) * 60 + currentTime.getUTCMinutes();
+
+  // Find if any nearby stop has an active truck
+  for (const stop of nearestStops) {
+    const garbage = await getTruckLiveData(`${stop.route_id}:0`);
+    const recycling = await getTruckLiveData(`${stop.route_id}:1`);
+    
+    // Legacy fallback check just in case
+    const garbageLegacy = !garbage ? await getTruckLiveData(stop.route_id) : null;
+    
+    if (garbage || recycling || garbageLegacy) {
+      nearestStop = stop;
+      truckData = { garbage: garbage || garbageLegacy, recycling };
+      break;
     }
   }
-  if (!truckData.recycling) {
-    truckData.recycling = await getTruckLiveData(`${nearestStop.route_id}:1`);
+
+  // If no active trucks found, fallback to time-based selection
+  if (!truckData.garbage && !truckData.recycling) {
+    let bestUpcomingStop = nearestStops[0]; // fallback to geographically nearest
+    let bestTimeDiff = Infinity;
+    
+    for (const stop of nearestStops) {
+      if (!stop.scheduled_time) continue;
+      const [h, m] = stop.scheduled_time.split(':').map(Number);
+      const stopMinutes = h * 60 + m;
+      
+      const diff = stopMinutes - currentMinutes;
+      // We allow up to 60 minutes in the past (diff >= -60), meaning truck might be delayed
+      // Pick the closest upcoming valid stop
+      if (diff >= -60 && diff < bestTimeDiff) {
+        bestTimeDiff = diff;
+        bestUpcomingStop = stop;
+      }
+    }
+    nearestStop = bestUpcomingStop;
   }
 
   const garbageTruck = truckData.garbage;
