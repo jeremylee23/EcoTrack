@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "dev": "vercel dev",
-    "sync": "ts-node -e \"require('./src/services/truck.service').syncTrucksFromHccg().then(console.log)\""
+    "sync": "ts-node -e \"require('./src/services/truck.service').syncTrucksFromHccg().then(console.log)\"",
+    "prepare": "husky"
   },
   "keywords": [],
   "author": "",
