@@ -13,7 +13,7 @@ import crypto from "crypto";
 import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
 import { upsertUserLocation, getUserByLineId } from "../src/services/user.service.js";
-import { calculateEta, syncTrucksFromHccg } from "../src/services/truck.service.js";
+import { calculateEta } from "../src/services/truck.service.js";
 import {
   replyMessage,
   buildTextMessage,
@@ -109,14 +109,6 @@ async function handleTextMessage(
         buildTextMessage("⚠️ 無法讀取您的位置資料，請重新傳送 GPS 位置。"),
       ]);
       return;
-    }
-
-    // Force a fresh sync from HCCG API before calculating ETA to ensure real-time accuracy
-    try {
-      await syncTrucksFromHccg();
-    } catch (e) {
-      console.error("[Webhook] syncTrucksFromHccg error:", e);
-      // We continue even if sync fails, calculateEta will use whatever is in Redis
     }
 
     const eta = await calculateEta(coordData.lat, coordData.lng);

@@ -95,8 +95,17 @@ export async function calculateEta(
     };
   }
 
-  // Step 2: truck live data from Redis
-  const truckData = await getTruckLiveData(nearestStop.route_id);
+  // Step 2: Fetch real-time data from HCCG directly for this specific route.
+  // This is extremely fast (O(1)) and guarantees < 30s latency without blocking.
+  let truckData = await syncSingleTruckFromHccg(nearestStop.route_id).catch(err => {
+    console.error("[TruckService] Failed to fetch single truck:", err);
+    return null;
+  });
+
+  // Fallback to Redis if API is down
+  if (!truckData) {
+    truckData = await getTruckLiveData(nearestStop.route_id);
+  }
 
   if (!truckData) {
     return {
@@ -187,6 +196,67 @@ export async function calculateEta(
 }
 
 // ── HCCG API sync ────────────────────────────────────────────
+
+/**
+ * Fetches the latest GPS position for a SINGLE vehicle route from the HCCG API.
+ * This is incredibly fast and avoids the heavy lifting of parsing all 130+ trucks.
+ * Saves to Redis and resolves ETA logs asynchronously.
+ */
+export async function syncSingleTruckFromHccg(routeId: string): Promise<TruckLiveData | null> {
+  const url = `${config.hccg.baseUrl}/getCarLocation?rId=${routeId}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Referer: config.hccg.referer,
+      "User-Agent": "EcoTrack-Bot/1.0",
+    },
+    signal: AbortSignal.timeout(5_000), // very short timeout for UX
+  });
+
+  if (!response.ok) return null;
+
+  const json = (await response.json()) as HccgApiResponse<HccgCarLocationData>;
+  if (json.statusCode !== 1 || !json.data || json.data.car.length === 0) return null;
+
+  const car = json.data.car[0];
+  const lat = parseFloat(car.lat);
+  const lng = parseFloat(car.lon);
+
+  if (!isValidCoordinate(lat, lng)) return null;
+
+  const liveData: TruckLiveData = {
+    lat,
+    lng,
+    speed: 0,
+    updated_at: new Date(
+      car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
+    ).toISOString(),
+    heading_to_stop_sequence: parseInt(car.seq, 10) || 0,
+    car_no: car.carNo,
+    route_name: car.routeName,
+    status: car.carStatus,
+    direction: car.direction,
+  };
+
+  // Async save to Redis
+  setTruckLiveData(car.routeId, liveData).catch(console.error);
+
+  // Async resolve ETA logs
+  const currentSeq = parseInt(car.seq, 10);
+  if (!isNaN(currentSeq) && currentSeq > 0) {
+    const db = getSupabaseClient();
+    db.from("eta_logs")
+      .update({ actual_arrival_time: liveData.updated_at })
+      .eq("route_id", car.routeId)
+      .is("actual_arrival_time", null)
+      .lte("stop_id", currentSeq)
+      .then(({error}) => {
+        if (error) console.error("[TruckService] Failed to resolve eta_logs:", error.message);
+      });
+  }
+
+  return liveData;
+}
 
 /**
  * Fetches the latest GPS positions for all vehicles from the HCCG API.
