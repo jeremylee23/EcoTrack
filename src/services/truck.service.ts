@@ -114,8 +114,21 @@ export async function calculateEta(
   }
 
   const garbageTruck = truckData.garbage;
+  const recyclingTruck = truckData.recycling;
+
+  if (!garbageTruck && !recyclingTruck) {
+    const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
+    return {
+      found: false,
+      message: `⚠️ 目前無法取得該路線車輛的即時 GPS 訊號（可能尚未發車或收班）。\n\n` +
+               `📍 離您最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
+               `🕐 官方表定時間：${timeStr}\n\n` +
+               `💡 提示：您可以在接近表定時間時再次查詢！`,
+    };
+  }
 
   if (!garbageTruck) {
+    const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
     return {
       found: true,
       routeId: nearestStop.route_id,
@@ -125,10 +138,10 @@ export async function calculateEta(
       stopLng: nearestStop.lng,
       userLat,
       userLng,
-      scheduledTime: nearestStop.scheduled_time ?? undefined,
+      scheduledTime: timeStr,
       message: `📍 找到最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 表定時間：${nearestStop.scheduled_time ?? "未知"}\n` +
-               `⚠️ 目前無法取得該路線車輛的即時 GPS 訊號（可能尚未出車或訊號中斷），請稍後再查詢。`,
+               `🕐 表定時間：${timeStr}\n` +
+               `⚠️ 目前無法取得垃圾車的即時 GPS 訊號（可能尚未出車或訊號中斷），請稍後再查詢。`,
     };
   }
 
@@ -206,10 +219,11 @@ export async function calculateEta(
   }
 
   // Basic message fallback (will be overridden by Line Service Flex Message anyway)
+  const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
   const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-                  `🕐 表定時間：${nearestStop.scheduled_time ?? "未知"}\n` +
+                  `🕐 表定時間：${formattedTime}\n` +
                   `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
-                  (recyclingEtaMinutes ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
+                  (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 
   return {
     found: true,
@@ -228,7 +242,7 @@ export async function calculateEta(
     recyclingTruckLat: recyclingTruck?.lat,
     recyclingTruckLng: recyclingTruck?.lng,
     recyclingEtaMinutes,
-    scheduledTime: nearestStop.scheduled_time ?? undefined,
+    scheduledTime: formattedTime,
     message,
   };
 }
