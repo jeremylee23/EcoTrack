@@ -124,7 +124,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 size: eta.nextGarbageDate ? "sm" : "md",
                 color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6"),
                 margin: "md",
-                flex: 1
+                flex: 1,
+                wrap: true
               },
               {
                 type: "text",
@@ -144,7 +145,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 size: eta.nextRecycleDate ? "sm" : "md",
                 color: eta.nextRecycleDate ? "#9ca3af" : (eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981"),
                 margin: "md",
-                flex: 1
+                flex: 1,
+                wrap: true
               }
             ]
           },

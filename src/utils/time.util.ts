@@ -64,7 +64,7 @@ export function getNextScheduledArrival(
       const dd = targetDate.getUTCDate().toString().padStart(2, "0");
       
       return {
-        dateStr: `${mm}/${dd} (星期${dayNames[checkDay]}) ${scheduledTime}`,
+        dateStr: `${mm}/${dd}(${dayNames[checkDay]}) ${scheduledTime}`,
         isToday: false
       };
     }
