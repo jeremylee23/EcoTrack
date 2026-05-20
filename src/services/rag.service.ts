@@ -20,7 +20,7 @@ export async function classifyIntent(text: string): Promise<Intent> {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
     const prompt = `
 你是一個新竹市垃圾車客服系統的意圖分類器。
 使用者會傳送一句話，請你判斷這句話的意圖，只能回傳以下其中一個單字：
@@ -87,7 +87,7 @@ export async function generateRagResponse(query: string): Promise<string> {
     }
 
     // 3. 組裝 Prompt 並呼叫 Gemini 進行生成
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
     const prompt = `
 你是「新竹市垃圾車追蹤系統」的客服小幫手，請溫柔親切地回答民眾的問題。
 如果提供的背景知識中沒有答案，請婉轉地告知民眾你目前還不知道，或建議他們聯絡新竹市環保局 (03-536-8920)。

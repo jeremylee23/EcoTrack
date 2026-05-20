@@ -149,13 +149,15 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
             layout: "vertical" as const,
             margin: "md" as const,
             paddingAll: "sm" as const,
-            backgroundColor: "#fef2f2",
+            backgroundColor: (eta.staleMinutes ?? 0) > 120 ? "#fffbeb" : "#fef2f2",
             cornerRadius: "sm" as const,
             contents: [
               {
                 type: "text" as const,
-                text: `⚠️ 車輛 GPS 已停滯約 ${eta.staleMinutes} 分鐘，預估時間可能不準確。`,
-                color: "#dc2626",
+                text: (eta.staleMinutes ?? 0) > 120
+                  ? `⚠️ GPS 訊號已超過 ${Math.round((eta.staleMinutes ?? 0) / 60)} 小時未更新（預估僅供參考）\n💡 這不代表車輛閒置，昨日垃圾車仍可能正常出動，建議於表定時間前 30 分鐘再查。`
+                  : `⚠️ GPS 已 ${eta.staleMinutes} 分鐘未更新，預估時間可能不準確。`,
+                color: (eta.staleMinutes ?? 0) > 120 ? "#92400e" : "#dc2626",
                 size: "xs" as const,
                 wrap: true
               }

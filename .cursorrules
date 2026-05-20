@@ -1,0 +1,24 @@
+# AI Agent 操作指南 (EcoTrack 專案)
+
+## 專案知識庫 (RAG 系統)
+本專案已導入 RAG (Retrieval-Augmented Generation) 知識庫，儲存了所有核心演算法、API 規格與架構設計的歷史決策。
+
+**⚠️ AI 代理人強制指令 (CRITICAL INSTRUCTION)**：
+當您（AI Agent）被要求新增功能、修改核心邏輯、或回答有關此專案架構的問題時，**您必須先主動使用終端機執行以下命令來查詢知識庫**，以避免破壞現有的特殊邏輯（例如 GPS 閒置判斷、路線切換等）：
+
+```bash
+npx ts-node scripts/query-rag.ts "<你要查詢的關鍵字或問題>"
+```
+
+### 執行範例：
+如果人類要求：「幫我修改 GPS 過期的提示文字」，您必須先在背景執行：
+`npx ts-node scripts/query-rag.ts "GPS 過期 閒置 停滯"`
+閱讀回傳的上下文後，再開始修改程式碼。
+
+---
+
+## 專案技術棧
+- **後端**：Vercel Serverless Functions (`api/webhook.ts`)
+- **資料庫**：Supabase (PostgreSQL + PostGIS)
+- **快取**：Upstash Redis
+- **主要語言**：TypeScript

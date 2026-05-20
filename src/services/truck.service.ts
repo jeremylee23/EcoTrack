@@ -41,6 +41,14 @@ function getRedis(): Redis {
 // ── Redis key helpers ────────────────────────────────────────
 
 const TRUCK_KEY = (routeId: string) => `truck_live:${routeId}`;
+const USER_ROUTE_KEY = (userId: string) => `user_route:${userId}`;
+
+// Stale threshold: Redis data older than 6 hours is considered "today unavailable"
+// (Truck ran yesterday, GPS off now — don't mislead user into thinking it's idle)
+const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+
+// Alternative route search radius when primary route has no active truck
+const ALT_ROUTE_RADIUS_M = 100;
 
 // ── Redis CRUD ───────────────────────────────────────────────
 
@@ -68,6 +76,21 @@ export async function setTruckLiveData(
   await redis.set(TRUCK_KEY(routeId), data, {
     ex: config.hsinchu.truckLiveTtlSeconds,
   });
+}
+
+/**
+ * Stores which route a user was last tracking.
+ * Used to detect address changes and notify user of route switch.
+ */
+export async function getUserRouteId(userId: string): Promise<string | null> {
+  const redis = getRedis();
+  return redis.get<string>(USER_ROUTE_KEY(userId));
+}
+
+export async function setUserRouteId(userId: string, routeId: string, routeName: string): Promise<void> {
+  const redis = getRedis();
+  // Store as JSON so we can also retrieve the route name
+  await redis.set(USER_ROUTE_KEY(userId), JSON.stringify({ routeId, routeName }), { ex: 60 * 60 * 24 * 7 }); // 7 days TTL
 }
 
 // ── ETA Calculation ──────────────────────────────────────────
@@ -162,13 +185,43 @@ export async function calculateEta(
     return { garbage: null, recycling: null };
   });
 
-  // Fallback to Redis if API is down
+  // Fallback to Redis ONLY if data is recent (< 6 hours).
+  // Avoid misleading user: if Monday's Redis data is returned on Wednesday,
+  // the truck looks "idle for 2 days" even though it ran on Tuesday.
+  const now_fallback = Date.now();
   if (!truckData.garbage) {
-    truckData.garbage = await getTruckLiveData(`${nearestStop.route_id}:0`);
-    if (!truckData.garbage) truckData.garbage = await getTruckLiveData(nearestStop.route_id);
+    const redisFallback = await getTruckLiveData(`${nearestStop.route_id}:0`)
+      ?? await getTruckLiveData(nearestStop.route_id);
+    if (redisFallback) {
+      const ageMs = now_fallback - new Date(redisFallback.updated_at).getTime();
+      if (ageMs < STALE_THRESHOLD_MS) truckData.garbage = redisFallback;
+    }
   }
   if (!truckData.recycling) {
-    truckData.recycling = await getTruckLiveData(`${nearestStop.route_id}:1`);
+    const recFallback = await getTruckLiveData(`${nearestStop.route_id}:1`);
+    if (recFallback) {
+      const ageMs = now_fallback - new Date(recFallback.updated_at).getTime();
+      if (ageMs < STALE_THRESHOLD_MS) truckData.recycling = recFallback;
+    }
+  }
+
+  // Fix 3: If primary route has no active truck, try alternative routes within 100m
+  if (!truckData.garbage && !truckData.recycling) {
+    for (const altStop of nearestStops.slice(1)) {
+      if (altStop.route_id === nearestStop.route_id) continue;
+      const altDistM = haversineDistance(userLat, userLng, altStop.lat, altStop.lng) * 1000;
+      if (altDistM > ALT_ROUTE_RADIUS_M) continue;
+
+      const altData = await syncSingleTruckFromHccg(altStop.route_id).catch(() => ({
+        garbage: null, recycling: null,
+      }));
+      if (altData.garbage || altData.recycling) {
+        console.log(`[TruckService] Switched to alt route ${altStop.route_id} (${altDistM.toFixed(0)}m away)`);
+        nearestStop = altStop;
+        truckData = altData;
+        break;
+      }
+    }
   }
 
   const garbageTruck = truckData.garbage;
@@ -181,10 +234,11 @@ export async function calculateEta(
     const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
     return {
       found: false,
-      message: `⚠️ 目前無法取得該路線車輛的即時 GPS 訊號（可能尚未發車或收班）。\n\n` +
-               `📍 離您最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
+      message: `⚠️ 今日目前無法取得此區域垃圾車的即時 GPS 訊號。\n\n` +
+               `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
                `🕐 官方表定時間：${timeStr}${avgStr}\n\n` +
-               `💡 提示：您可以在接近表定時間時再次查詢！`,
+               `💡 注意：即使顯示無訊號，昨日垃圾車仍可能正常出動。\n` +
+               `此查詢結果為當下即時訊號，建議在表定時間前 30 分鐘再次查詢！`,
     };
   }
 

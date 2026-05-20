@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "dev": "vercel dev",
+    "ship": "bash scripts/ship.sh",
     "sync": "ts-node -e \"require('./src/services/truck.service').syncTrucksFromHccg().then(console.log)\"",
     "prepare": "husky"
   },
@@ -13,6 +14,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@line/bot-sdk": "^11.0.0",
     "@supabase/supabase-js": "^2.105.4",
     "@upstash/redis": "^1.38.0",
