@@ -12,8 +12,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import crypto from "crypto";
 import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
-import { upsertUserLocation, getUserByLineId } from "../src/services/user.service.js";
-import { calculateEta } from "../src/services/truck.service.js";
+import { upsertUserLocation, getUserByLineId, getNearestStop } from "../src/services/user.service.js";
+import { calculateEta, getUserRouteId, setUserRouteId } from "../src/services/truck.service.js";
 import {
   replyMessage,
   buildTextMessage,
@@ -21,6 +21,7 @@ import {
   buildLocationConfirmMessage,
   buildWelcomeMessage,
 } from "../src/services/line.service.js";
+import { classifyIntent, generateRagResponse } from "../src/services/rag.service.js";
 
 // ── Type aliases from LINE SDK v8 webhook namespace ──────────
 type Event            = webhook.Event;
@@ -63,9 +64,38 @@ async function handleLocationMessage(
   const { latitude, longitude, address } = msg;
   if (latitude == null || longitude == null) return;
 
+  // Update location in DB
   await upsertUserLocation(userId, latitude, longitude);
+
+  // Fix 1: Detect if user switched to a different route after changing address
+  let routeSwitchNotice = "";
+  try {
+    const [nearestStops, prevRouteRaw] = await Promise.all([
+      getNearestStop(latitude, longitude),
+      getUserRouteId(userId),
+    ]);
+
+    if (nearestStops.length > 0) {
+      const newStop = nearestStops[0];
+      const prevRoute = prevRouteRaw ? JSON.parse(prevRouteRaw) : null;
+
+      if (prevRoute && prevRoute.routeId !== newStop.route_id) {
+        // User moved to a different route area
+        routeSwitchNotice = `\n\n🔄 路線已切換\n` +
+          `原路線：${prevRoute.routeName}\n` +
+          `新路線：${newStop.route_id}\n` +
+          `現在將追蹤新地址最近的垃圾車 🚛`;
+      }
+
+      // Update cached route for this user (route_id used as display name too)
+      await setUserRouteId(userId, newStop.route_id, newStop.route_id);
+    }
+  } catch (err) {
+    console.error("[Webhook] Route switch detection failed:", err);
+  }
+
   await replyMessage(replyToken, [
-    buildLocationConfirmMessage(address ?? "未知地址"),
+    buildLocationConfirmMessage((address ?? "未知地址") + routeSwitchNotice),
   ]);
 }
 
@@ -76,8 +106,17 @@ async function handleTextMessage(
 ): Promise<void> {
   const text = msg.text.trim();
 
-  // ETA query keywords
-  if (/垃圾車|在哪|幾點|到了|幾分|多久|ETA/i.test(text)) {
+  // 1. 意圖分類
+  const intent = await classifyIntent(text);
+
+  // 2. 處理 Help
+  if (intent === "help") {
+    await replyMessage(replyToken, [buildWelcomeMessage()]);
+    return;
+  }
+
+  // 3. 處理 ETA
+  if (intent === "eta") {
     const user = await getUserByLineId(userId);
 
     if (!user?.home_location) {
@@ -116,18 +155,20 @@ async function handleTextMessage(
     return;
   }
 
-  // Help keywords
-  if (/你好|hello|hi|幫助|help|怎麼用|使用/i.test(text)) {
-    await replyMessage(replyToken, [buildWelcomeMessage()]);
+  // 4. 處理 RAG 問題
+  if (intent === "rag") {
+    const answer = await generateRagResponse(text);
+    await replyMessage(replyToken, [buildTextMessage(answer)]);
     return;
   }
 
-  // Default fallback
+  // 5. Default fallback (unknown)
   await replyMessage(replyToken, [
     buildTextMessage(
       "🤔 我不太懂這個指令...\n\n" +
       "💡 試試看：\n" +
       "• 傳送「垃圾車在哪」→ 查詢 ETA\n" +
+      "• 傳送「為什麼垃圾車今天沒來」→ 查詢知識庫\n" +
       "• 傳送 GPS 位置 → 綁定住家\n" +
       "• 傳送「幫助」→ 查看使用說明"
     ),

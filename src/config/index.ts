@@ -39,6 +39,11 @@ export const config = {
     channelAccessToken: requireEnv("LINE_CHANNEL_ACCESS_TOKEN"),
   },
 
+  // Gemini API
+  gemini: {
+    apiKey: requireEnv("GEMINI_API_KEY"),
+  },
+
   // Hsinchu City Government API
   hccg: {
     baseUrl: optionalEnv(
