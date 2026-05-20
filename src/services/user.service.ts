@@ -97,5 +97,22 @@ export async function getNearestStop(
     return [];
   }
 
-  return data as NearestStopResult[];
+  // Workaround: The RPC find_nearest_stop might have a fixed RETURNS TABLE schema that omits trash_day/recycle_day.
+  // We fetch them manually here and merge them.
+  const stops = data as NearestStopResult[];
+  const stopIds = stops.map(s => s.id);
+  const { data: extraData } = await db.from("route_stops").select("id, trash_day, recycle_day").in("id", stopIds);
+
+  if (extraData) {
+    const extraMap = new Map(extraData.map(e => [e.id, e]));
+    for (const stop of stops) {
+      const extra = extraMap.get(stop.id);
+      if (extra) {
+        stop.trash_day = extra.trash_day;
+        stop.recycle_day = extra.recycle_day;
+      }
+    }
+  }
+
+  return stops;
 }
