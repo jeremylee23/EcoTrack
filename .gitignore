@@ -5,3 +5,13 @@ dist
 coverage
 .DS_Store
 scripts/rich-menu.png
+
+# Temporary test files
+test_*.ts
+test_*.mjs
+*.log
+*.png
+*.json
+!package*.json
+!vercel.json
+!.env.example
