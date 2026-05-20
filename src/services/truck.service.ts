@@ -297,7 +297,11 @@ export async function calculateEta(
     }
   }
 
-  const nextGarbageInfo = getNextScheduledArrival(nearestStop.trash_day, formattedTime, isGarbagePassed);
+  // Default garbage days in Hsinchu
+  const nextGarbageInfo = getNextScheduledArrival(nearestStop.trash_day, formattedTime, isGarbagePassed, [1, 2, 4, 5, 6]);
+  
+  // Default recycling days: usually we don't know without route schedule, but if empty, maybe it's not serviced.
+  // We can just rely on the API or if empty return null for recycling.
   const nextRecycleInfo = getNextScheduledArrival(nearestStop.recycle_day, formattedTime, isRecyclePassed);
 
   // If both are not coming today (or already passed), we just return next schedules!

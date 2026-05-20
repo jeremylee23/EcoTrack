@@ -1,12 +1,19 @@
 export function getNextScheduledArrival(
   daysString: string | null, // e.g., "1,2,4,5,6" (1=Mon, 7=Sun)
   scheduledTime: string | null, // e.g., "18:30"
-  hasPassedToday: boolean = false
+  hasPassedToday: boolean = false,
+  defaultDays?: number[]
 ): { dateStr: string; isToday: boolean } | null {
   if (!daysString || !scheduledTime) return null;
 
-  const validDays = daysString.split(",").map(Number).filter(n => !isNaN(n));
-  if (validDays.length === 0) return null;
+  let validDays = daysString.split(",").map(Number).filter(n => !isNaN(n) && n >= 1 && n <= 7);
+  if (validDays.length === 0) {
+    if (defaultDays && defaultDays.length > 0) {
+      validDays = defaultDays;
+    } else {
+      return null;
+    }
+  }
 
   const [hours, minutes] = scheduledTime.split(":").map(Number);
   if (isNaN(hours) || isNaN(minutes)) return null;
