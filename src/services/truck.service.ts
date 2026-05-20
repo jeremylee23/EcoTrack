@@ -23,6 +23,7 @@ import type {
   HccgCarLocation,
   HccgCleanPointData,
 } from "../types/index.js";
+import { getNextScheduledArrival } from "../utils/time.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -262,13 +263,66 @@ export async function calculateEta(
   }
 
   // Check if truck GPS is stale
-  const lastUpdate = new Date(garbageTruck.updated_at);
   const now = new Date();
-  const staleMinutes = Math.floor((now.getTime() - lastUpdate.getTime()) / 60000);
-  const isStale = staleMinutes > 3;
-  let staleWarning = "";
-  if (isStale) {
-    staleWarning = `\n⚠️ 垃圾車 GPS 已有 ${staleMinutes} 分鐘未移動或更新。`;
+
+  // FIX: Identify if today is a valid service day, or if truck has already passed
+  const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
+  
+  let isGarbagePassed = false;
+  let isRecyclePassed = false;
+  
+  if (garbageTruck) {
+    if (garbageTruck.heading_to_stop_sequence > nearestStop.sequence_order) {
+      isGarbagePassed = true;
+    }
+  } else if (nearestStop.scheduled_time) {
+    const [h, m] = nearestStop.scheduled_time.split(':').map(Number);
+    const stopMins = h * 60 + m;
+    const currentMins = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes();
+    if (currentMins > stopMins + 30) {
+      isGarbagePassed = true; // No truck, and it's 30+ mins past scheduled time
+    }
+  }
+
+  if (recyclingTruck) {
+    if (recyclingTruck.heading_to_stop_sequence > nearestStop.sequence_order) {
+      isRecyclePassed = true;
+    }
+  } else if (nearestStop.scheduled_time) {
+    const [h, m] = nearestStop.scheduled_time.split(':').map(Number);
+    const stopMins = h * 60 + m;
+    const currentMins = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes();
+    if (currentMins > stopMins + 30) {
+      isRecyclePassed = true;
+    }
+  }
+
+  const nextGarbageInfo = getNextScheduledArrival(nearestStop.trash_day, formattedTime, isGarbagePassed);
+  const nextRecycleInfo = getNextScheduledArrival(nearestStop.recycle_day, formattedTime, isRecyclePassed);
+
+  // If both are not coming today (or already passed), we just return next schedules!
+  if ((!nextGarbageInfo || !nextGarbageInfo.isToday) && (!nextRecycleInfo || !nextRecycleInfo.isToday)) {
+    const gMsg = nextGarbageInfo ? `\n🚛 下次垃圾車：${nextGarbageInfo.dateStr}` : "";
+    const rMsg = nextRecycleInfo ? `\n♻️ 下次回收車：${nextRecycleInfo.dateStr}` : "";
+    
+    return {
+      found: true,
+      routeId: nearestStop.route_id,
+      nearestStopName: nearestStop.point_name ?? undefined,
+      nearestStopAddress: nearestStop.address ?? undefined,
+      stopLat: nearestStop.lat,
+      stopLng: nearestStop.lng,
+      userLat,
+      userLng,
+      scheduledTime: formattedTime,
+      historicalAvgTime: historicalAvg,
+      nextGarbageDate: nextGarbageInfo?.dateStr,
+      nextRecycleDate: nextRecycleInfo?.dateStr,
+      isGarbagePassed,
+      isRecyclePassed,
+      message: `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
+               `⚠️ 今日無班次或已過站。${gMsg}${rMsg}`,
+    };
   }
 
   // Step 3: compute intermediate stops between truck's current seq and target stop seq
@@ -344,10 +398,9 @@ export async function calculateEta(
   }
 
   // Basic message fallback (will be overridden by Line Service Flex Message anyway)
-  const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
   const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
                   `🕐 官方表定：${formattedTime}${avgStr}\n` +
-                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘${staleWarning}` +
+                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
                   (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
 
   return {
@@ -369,9 +422,13 @@ export async function calculateEta(
     recyclingEtaMinutes,
     scheduledTime: formattedTime,
     historicalAvgTime: historicalAvg,
+    nextGarbageDate: nextGarbageInfo?.dateStr,
+    nextRecycleDate: nextRecycleInfo?.dateStr,
+    isGarbagePassed,
+    isRecyclePassed,
     message,
-    isStale,
-    staleMinutes
+    isStale: false, // Legacy fields
+    staleMinutes: 0
   } as EtaResult & { isStale?: boolean; staleMinutes?: number };
 }
 

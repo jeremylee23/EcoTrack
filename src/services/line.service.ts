@@ -63,8 +63,8 @@ export function buildLocationMessage(
 }
 
 export function buildEtaMessages(eta: EtaResult): Message[] {
-  // If no truck coordinates, just fallback to text
-  if (eta.truckLat === undefined || eta.truckLng === undefined) {
+  // If no truck coordinates and no next dates, just fallback to text
+  if (eta.truckLat === undefined && eta.truckLng === undefined && !eta.nextGarbageDate && !eta.nextRecycleDate) {
     return [buildTextMessage(eta.message)];
   }
 
@@ -75,8 +75,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
   if (eta.userLng) params.append("uLng", eta.userLng.toString());
   if (eta.stopLat) params.append("sLat", eta.stopLat.toString());
   if (eta.stopLng) params.append("sLng", eta.stopLng.toString());
-  params.append("tLat", eta.truckLat.toString());
-  params.append("tLng", eta.truckLng.toString());
+  if (eta.truckLat !== undefined) params.append("tLat", eta.truckLat.toString());
+  if (eta.truckLng !== undefined) params.append("tLng", eta.truckLng.toString());
   if (eta.carNo) params.append("car", eta.carNo);
   if (eta.recyclingTruckLat && eta.recyclingTruckLng) {
     params.append("rLat", eta.recyclingTruckLat.toString());
@@ -115,12 +115,14 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
-                  ? "即將抵達" 
-                  : (eta.etaMinutes !== undefined ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)` : "未知"),
+                text: eta.nextGarbageDate
+                  ? (eta.isGarbagePassed ? `已過站，下次 ${eta.nextGarbageDate}` : `下次 ${eta.nextGarbageDate}`)
+                  : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
+                    ? "即將抵達" 
+                    : (eta.etaMinutes !== undefined ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)` : "未知")),
                 weight: "bold",
-                size: "md",
-                color: eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6",
+                size: eta.nextGarbageDate ? "sm" : "md",
+                color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6"),
                 margin: "md",
                 flex: 1
               },
@@ -133,12 +135,14 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.recyclingEtaMinutes !== undefined 
-                  ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
-                  : "無資料",
+                text: eta.nextRecycleDate
+                  ? (eta.isRecyclePassed ? `已過站，下次 ${eta.nextRecycleDate}` : `下次 ${eta.nextRecycleDate}`)
+                  : (eta.recyclingEtaMinutes !== undefined 
+                    ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
+                    : "無資料"),
                 weight: "bold",
-                size: "md",
-                color: eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981",
+                size: eta.nextRecycleDate ? "sm" : "md",
+                color: eta.nextRecycleDate ? "#9ca3af" : (eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981"),
                 margin: "md",
                 flex: 1
               }
@@ -271,7 +275,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               {
                 type: "button",
                 style: "primary",
-                color: "#10b981",
+                color: (!eta.nextGarbageDate && !eta.nextRecycleDate) ? "#10b981" : "#d1d5db",
                 height: "sm",
                 action: {
                   type: "uri",

@@ -37,6 +37,8 @@ export interface NearestStopResult {
   scheduled_time: string | null;
   point_name: string | null;
   address: string | null;
+  trash_day: string | null;
+  recycle_day: string | null;
   lat: number;
   lng: number;
   distance_meters: number;
@@ -165,6 +167,10 @@ export interface EtaResult {
   recyclingEtaMinutes?: number;
   message: string;
   scheduledTime?: string;
+  nextGarbageDate?: string; // e.g. "05-21 (四) 18:30"
+  nextRecycleDate?: string;
+  isGarbagePassed?: boolean;
+  isRecyclePassed?: boolean;
   historicalAvgTime?: string;
   isStale?: boolean;
   staleMinutes?: number;
