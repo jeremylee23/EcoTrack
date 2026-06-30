@@ -64,7 +64,14 @@ export function buildLocationMessage(
 
 export function buildEtaMessages(eta: EtaResult): Message[] {
   // If no truck coordinates and no next dates, just fallback to text
-  if (eta.truckLat === undefined && eta.truckLng === undefined && !eta.nextGarbageDate && !eta.nextRecycleDate) {
+  if (
+    eta.truckLat === undefined &&
+    eta.truckLng === undefined &&
+    eta.etaMinutes === undefined &&
+    eta.recyclingEtaMinutes === undefined &&
+    !eta.nextGarbageDate &&
+    !eta.nextRecycleDate
+  ) {
     return [buildTextMessage(eta.message)];
   }
 

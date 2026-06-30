@@ -62,6 +62,10 @@ export const config = {
     nearestStopRadiusMeters: 1500,
     // Redis TTL for live truck data (seconds)
     truckLiveTtlSeconds: 300,
+    // Redis TTL for cached nearby-point lookups (seconds).
+    // Official site refreshes every 15s, so a short window keeps ETA fresh
+    // while collapsing repeated queries from the same user/location.
+    nearbyCacheTtlSeconds: 20,
     // Max plausible speed for teleport detection (km/h)
     maxPlausibleSpeedKmh: 80,
   },

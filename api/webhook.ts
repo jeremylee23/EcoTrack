@@ -12,8 +12,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import crypto from "crypto";
 import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
-import { upsertUserLocation, getUserByLineId, getNearestStop } from "../src/services/user.service.js";
-import { calculateEta, getUserRouteId, setUserRouteId } from "../src/services/truck.service.js";
+import { upsertUserLocation, getUserByLineId } from "../src/services/user.service.js";
+import { calculateEta, getUserRouteId, setUserRouteId, resolveNearestRoute } from "../src/services/truck.service.js";
 import {
   replyMessage,
   buildTextMessage,
@@ -70,25 +70,24 @@ async function handleLocationMessage(
   // Fix 1: Detect if user switched to a different route after changing address
   let routeSwitchNotice = "";
   try {
-    const [nearestStops, prevRouteRaw] = await Promise.all([
-      getNearestStop(latitude, longitude),
+    const [nearestRoute, prevRouteRaw] = await Promise.all([
+      resolveNearestRoute(latitude, longitude),
       getUserRouteId(userId),
     ]);
 
-    if (nearestStops.length > 0) {
-      const newStop = nearestStops[0];
+    if (nearestRoute) {
       const prevRoute = prevRouteRaw ? JSON.parse(prevRouteRaw) : null;
 
-      if (prevRoute && prevRoute.routeId !== newStop.route_id) {
+      if (prevRoute && prevRoute.routeId !== nearestRoute.routeId) {
         // User moved to a different route area
         routeSwitchNotice = `\n\n🔄 路線已切換\n` +
           `原路線：${prevRoute.routeName}\n` +
-          `新路線：${newStop.route_id}\n` +
+          `新路線：${nearestRoute.routeName}\n` +
           `現在將追蹤新地址最近的垃圾車 🚛`;
       }
 
-      // Update cached route for this user (route_id used as display name too)
-      await setUserRouteId(userId, newStop.route_id, newStop.route_id);
+      // Update cached route for this user (now with the real route name)
+      await setUserRouteId(userId, nearestRoute.routeId, nearestRoute.routeName);
     }
   } catch (err) {
     console.error("[Webhook] Route switch detection failed:", err);

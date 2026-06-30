@@ -8,19 +8,20 @@
 
 import { Redis } from "@upstash/redis";
 import { config } from "../config/index.js";
-import { getNearestStop, getSupabaseClient } from "./user.service.js";
+import { getSupabaseClient } from "./user.service.js";
 import {
   haversineDistance,
   isValidCoordinate,
   isTeleport,
   estimateEtaMinutes,
+  parseScheduledTime,
 } from "../utils/geo.util.js";
 import type {
   TruckLiveData,
   EtaResult,
   HccgApiResponse,
   HccgCarLocationData,
-  HccgCarLocation,
+  HccgCleanPoint,
   HccgCleanPointData,
 } from "../types/index.js";
 import { getNextScheduledArrival } from "../utils/time.util.js";
@@ -43,13 +44,300 @@ function getRedis(): Redis {
 
 const TRUCK_KEY = (routeId: string) => `truck_live:${routeId}`;
 const USER_ROUTE_KEY = (userId: string) => `user_route:${userId}`;
+// Round coordinates to ~11m so repeated queries from the same spot share a cache entry.
+const POINTS_CACHE_KEY = (lat: number, lng: number) =>
+  `points_cache:${lat.toFixed(4)}:${lng.toFixed(4)}`;
 
 // Stale threshold: Redis data older than 6 hours is considered "today unavailable"
 // (Truck ran yesterday, GPS off now — don't mislead user into thinking it's idle)
 const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 
-// Alternative route search radius when primary route has no active truck
-const ALT_ROUTE_RADIUS_M = 100;
+// Official point query radii. Start narrow and widen to match the government UX.
+const POINT_SEARCH_RADII_M = [120, 200, 300, 500] as const;
+const DEFAULT_GARBAGE_DAYS = [1, 2, 4, 5, 6] as const;
+const OFFICIAL_LIVE_STATUS = "1";
+
+interface NearbyPointCandidate {
+  point: HccgCleanPoint;
+  distanceMeters: number;
+  scheduledTime: string | null;
+  minutesUntilScheduled: number | null;
+  garbageEtaMinutes?: number;
+  recyclingEtaMinutes?: number;
+  hasTodayGarbage: boolean;
+  hasTodayRecycling: boolean;
+}
+
+function getTaiwanNow(): Date {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000);
+}
+
+function getTaiwanWeekday(): number {
+  const weekday = getTaiwanNow().getUTCDay();
+  return weekday === 0 ? 7 : weekday;
+}
+
+function getTaiwanMinutesOfDay(): number {
+  const now = getTaiwanNow();
+  return now.getUTCHours() * 60 + now.getUTCMinutes();
+}
+
+function hasServiceToday(daysString: string | null | undefined): boolean {
+  if (!daysString) return false;
+
+  const weekday = getTaiwanWeekday();
+  return daysString
+    .split(",")
+    .map((value) => parseInt(value, 10))
+    .some((value) => value === weekday);
+}
+
+function getMinutesUntilScheduled(scheduledTime: string | null): number | null {
+  if (!scheduledTime) return null;
+
+  const [hours, minutes] = scheduledTime.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+
+  return hours * 60 + minutes - getTaiwanMinutesOfDay();
+}
+
+function getOfficialEtaMinutes(
+  point: HccgCleanPoint,
+  carType: "0" | "1"
+): number | undefined {
+  const isToday = carType === "0"
+    ? hasServiceToday(point.trashDay)
+    : hasServiceToday(point.recycleDay);
+
+  if (!isToday || point.status !== OFFICIAL_LIVE_STATUS) return undefined;
+
+  const estimateSeconds = parseInt(point.estimate, 10);
+  if (Number.isNaN(estimateSeconds) || estimateSeconds < 0) return undefined;
+
+  return Math.max(1, Math.ceil(estimateSeconds / 60));
+}
+
+function buildPointCandidate(
+  userLat: number,
+  userLng: number,
+  point: HccgCleanPoint
+): NearbyPointCandidate {
+  const lat = parseFloat(point.lat);
+  const lng = parseFloat(point.lon);
+  const scheduledTime = parseScheduledTime(point.time);
+
+  return {
+    point,
+    distanceMeters: haversineDistance(userLat, userLng, lat, lng) * 1000,
+    scheduledTime,
+    minutesUntilScheduled: getMinutesUntilScheduled(scheduledTime),
+    garbageEtaMinutes: getOfficialEtaMinutes(point, "0"),
+    recyclingEtaMinutes: getOfficialEtaMinutes(point, "1"),
+    hasTodayGarbage: hasServiceToday(point.trashDay),
+    hasTodayRecycling: hasServiceToday(point.recycleDay),
+  };
+}
+
+function getCandidateTimePenalty(candidate: NearbyPointCandidate): number {
+  const diff = candidate.minutesUntilScheduled;
+  if (diff === null) return 3000;
+  if (diff < -90) return 6000 + Math.abs(diff);
+  if (diff < -30) return 2000 + Math.abs(diff);
+  if (diff > 240) return 1000 + diff;
+  return Math.abs(diff);
+}
+
+function comparePointCandidates(
+  left: NearbyPointCandidate,
+  right: NearbyPointCandidate
+): number {
+  const leftHasEta =
+    left.garbageEtaMinutes !== undefined ||
+    left.recyclingEtaMinutes !== undefined;
+  const rightHasEta =
+    right.garbageEtaMinutes !== undefined ||
+    right.recyclingEtaMinutes !== undefined;
+
+  if (leftHasEta !== rightHasEta) return leftHasEta ? -1 : 1;
+
+  const leftHasTodayService = left.hasTodayGarbage || left.hasTodayRecycling;
+  const rightHasTodayService = right.hasTodayGarbage || right.hasTodayRecycling;
+  if (leftHasTodayService !== rightHasTodayService) {
+    return leftHasTodayService ? -1 : 1;
+  }
+
+  const timePenaltyDelta =
+    getCandidateTimePenalty(left) - getCandidateTimePenalty(right);
+  if (timePenaltyDelta !== 0) return timePenaltyDelta;
+
+  return left.distanceMeters - right.distanceMeters;
+}
+
+async function fetchNearbyPointsFromHccg(
+  userLat: number,
+  userLng: number
+): Promise<HccgCleanPoint[]> {
+  let lastError: Error | null = null;
+
+  for (const radius of POINT_SEARCH_RADII_M) {
+    try {
+      const params = new URLSearchParams({
+        lat: userLat.toString(),
+        lon: userLng.toString(),
+        range: radius.toString(),
+        locatemode: "1",
+      });
+
+      const response = await fetch(
+        `${config.hccg.baseUrl}/getPointData?${params.toString()}`,
+        {
+          headers: {
+            Referer: config.hccg.referer,
+            "User-Agent": "EcoTrack-Bot/1.0",
+          },
+          signal: AbortSignal.timeout(5_000),
+        }
+      );
+
+      if (!response.ok) {
+        lastError = new Error(
+          `[TruckService] HCCG point query returned ${response.status}`
+        );
+        break;
+      }
+
+      const json = (await response.json()) as HccgApiResponse<HccgCleanPointData>;
+      if (json.statusCode !== 1 || !json.data) {
+        lastError = new Error(
+          `[TruckService] HCCG point query error: ${json.message}`
+        );
+        break;
+      }
+
+      const points = json.data.cleanPoint.filter((point) =>
+        isValidCoordinate(parseFloat(point.lat), parseFloat(point.lon))
+      );
+
+      if (points.length > 0) return points;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      break;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return [];
+}
+
+/**
+ * Cached wrapper around fetchNearbyPointsFromHccg.
+ * Caches non-empty results in Redis for a short window to reduce official API
+ * load and stabilize responses. Empty results are never cached so they retry.
+ */
+async function fetchNearbyPointsCached(
+  userLat: number,
+  userLng: number
+): Promise<HccgCleanPoint[]> {
+  const redis = getRedis();
+  const cacheKey = POINTS_CACHE_KEY(userLat, userLng);
+
+  try {
+    const cached = await redis.get<HccgCleanPoint[]>(cacheKey);
+    if (cached && cached.length > 0) return cached;
+  } catch (error) {
+    console.error("[TruckService] Nearby points cache read failed:", error);
+  }
+
+  const points = await fetchNearbyPointsFromHccg(userLat, userLng);
+
+  if (points.length > 0) {
+    redis
+      .set(cacheKey, points, { ex: config.hsinchu.nearbyCacheTtlSeconds })
+      .catch((error) =>
+        console.error("[TruckService] Nearby points cache write failed:", error)
+      );
+  }
+
+  return points;
+}
+
+/**
+ * Resolves the single best nearby clean point for a coordinate using the same
+ * ranking as the ETA flow (official ETA → today's service → schedule → distance).
+ * Shared by calculateEta and route-switch detection so both agree on the route.
+ */
+async function selectNearbyCandidate(
+  userLat: number,
+  userLng: number
+): Promise<NearbyPointCandidate | null> {
+  let nearbyPoints: HccgCleanPoint[] = [];
+
+  try {
+    nearbyPoints = await fetchNearbyPointsCached(userLat, userLng);
+  } catch (error) {
+    console.error("[TruckService] Failed to fetch nearby points:", error);
+  }
+
+  if (nearbyPoints.length === 0) return null;
+
+  return (
+    nearbyPoints
+      .map((point) => buildPointCandidate(userLat, userLng, point))
+      .sort(comparePointCandidates)[0] ?? null
+  );
+}
+
+/**
+ * Resolves the route a user's location currently maps to, via the official
+ * nearby-point API. Used for route-switch detection when a user moves.
+ */
+export async function resolveNearestRoute(
+  userLat: number,
+  userLng: number
+): Promise<{ routeId: string; routeName: string } | null> {
+  const candidate = await selectNearbyCandidate(userLat, userLng);
+  if (!candidate) return null;
+
+  return {
+    routeId: candidate.point.routeId,
+    routeName: candidate.point.routeName,
+  };
+}
+
+async function getRecentTruckFallback(
+  routeId: string,
+  carType: "0" | "1"
+): Promise<TruckLiveData | null> {
+  const fallback = carType === "0"
+    ? (await getTruckLiveData(`${routeId}:0`)) ??
+      (await getTruckLiveData(routeId))
+    : await getTruckLiveData(`${routeId}:1`);
+
+  if (!fallback) return null;
+
+  const ageMs = Date.now() - new Date(fallback.updated_at).getTime();
+  return ageMs < STALE_THRESHOLD_MS ? fallback : null;
+}
+
+function estimateEtaFromTruck(
+  truck: TruckLiveData,
+  stopLat: number,
+  stopLng: number,
+  targetSequence: number
+): number {
+  const intermediateStops = Math.max(
+    0,
+    targetSequence - truck.heading_to_stop_sequence - 1
+  );
+  const distanceKm = haversineDistance(truck.lat, truck.lng, stopLat, stopLng);
+
+  return estimateEtaMinutes(
+    distanceKm,
+    intermediateStops,
+    config.hsinchu.avgSpeedKmh,
+    config.hsinchu.stopDwellSeconds
+  );
+}
 
 // ── Redis CRUD ───────────────────────────────────────────────
 
@@ -108,331 +396,216 @@ export async function calculateEta(
   userLat: number,
   userLng: number
 ): Promise<EtaResult> {
-  // Step 1: nearest stops from PostGIS (returns up to 20)
-  const nearestStops = await getNearestStop(userLat, userLng);
+  const candidate = await selectNearbyCandidate(userLat, userLng);
 
-  if (!nearestStops || nearestStops.length === 0) {
+  if (!candidate) {
     return {
       found: false,
       message:
-        "⚠️ 找不到您附近 1.5 公里內的清運站點，請確認您已傳送正確的位置，或目前此區域今日無清運服務。",
+        "⚠️ 找不到您附近的清運點，請確認 GPS 位置是否正確，或改在表定時間前後再查一次。",
     };
   }
 
-  // Step 2: Fast fetch of all active trucks (just in-memory, no Redis saves!) to avoid 15s latency
-  let activeRouteIds = new Set<string>();
-  try {
-    const url = `${config.hccg.baseUrl}/getCarLocation?rId=all`;
-    const response = await fetch(url, { headers: { Referer: config.hccg.referer }, signal: AbortSignal.timeout(3000) });
-    if (response.ok) {
-       const json = (await response.json()) as HccgApiResponse<HccgCarLocationData>;
-       if (json.statusCode === 1 && json.data) {
-          json.data.car.forEach(c => activeRouteIds.add(`${c.routeId}:${c.carType}`));
-       }
-    }
-  } catch (err) {
-    console.error("[TruckService] Failed to fast-fetch active trucks:", err);
-  }
+  const point = candidate.point;
+  const routeId = point.routeId;
+  const stopLat = parseFloat(point.lat);
+  const stopLng = parseFloat(point.lon);
+  const targetSequence = parseInt(point.seq, 10) || 0;
+  const formattedTime = candidate.scheduledTime ?? "未知";
+  const stopName = point.pointName || point.address;
 
-  let nearestStop = nearestStops[0];
-  let hasActiveTruck = false;
+  const historicalAvg =
+    targetSequence > 0
+      ? await getHistoricalAverage(routeId, targetSequence)
+      : undefined;
+  const historicalReference = historicalAvg ?? (point.historyTime || undefined);
 
-  const currentTime = new Date();
-  const currentMinutes = ((currentTime.getUTCHours() + 8) % 24) * 60 + currentTime.getUTCMinutes();
-
-  // Find if any nearby stop has an active truck in memory
-  for (const stop of nearestStops) {
-    const isGarbageActive = activeRouteIds.has(`${stop.route_id}:0`) || activeRouteIds.has(stop.route_id);
-    const isRecyclingActive = activeRouteIds.has(`${stop.route_id}:1`);
-    
-    let isScheduleValid = true;
-    if (stop.scheduled_time) {
-      const [h, m] = stop.scheduled_time.split(':').map(Number);
-      const diff = (h * 60 + m) - currentMinutes;
-      if (diff < -90) isScheduleValid = false; // more than 1.5 hours in the past
-    }
-    
-    if ((isGarbageActive || isRecyclingActive) && isScheduleValid) {
-      nearestStop = stop;
-      hasActiveTruck = true;
-      break;
-    }
-  }
-
-  // If no active trucks found, fallback to time-based selection
-  if (!hasActiveTruck) {
-    let bestUpcomingStop = nearestStops[0]; // fallback to geographically nearest
-    let bestTimeDiff = Infinity;
-    
-    for (const stop of nearestStops) {
-      if (!stop.scheduled_time) continue;
-      const [h, m] = stop.scheduled_time.split(':').map(Number);
-      const stopMinutes = h * 60 + m;
-      
-      const diff = stopMinutes - currentMinutes;
-      // We allow up to 60 minutes in the past (diff >= -60), meaning truck might be delayed
-      // Pick the closest upcoming valid stop
-      if (diff >= -60 && diff < bestTimeDiff) {
-        bestTimeDiff = diff;
-        bestUpcomingStop = stop;
-      }
-    }
-    nearestStop = bestUpcomingStop;
-  }
-
-  // Step 3: Now fetch real-time data ONLY for the single chosen route and save it to Redis
-  let truckData = await syncSingleTruckFromHccg(nearestStop.route_id).catch(err => {
-    console.error("[TruckService] Failed to fetch single truck:", err);
+  let truckData = await syncSingleTruckFromHccg(routeId).catch((error) => {
+    console.error("[TruckService] Failed to fetch single truck:", error);
     return { garbage: null, recycling: null };
   });
 
-  // Fallback to Redis ONLY if data is recent (< 6 hours).
-  // Avoid misleading user: if Monday's Redis data is returned on Wednesday,
-  // the truck looks "idle for 2 days" even though it ran on Tuesday.
-  const now_fallback = Date.now();
   if (!truckData.garbage) {
-    const redisFallback = await getTruckLiveData(`${nearestStop.route_id}:0`)
-      ?? await getTruckLiveData(nearestStop.route_id);
-    if (redisFallback) {
-      const ageMs = now_fallback - new Date(redisFallback.updated_at).getTime();
-      if (ageMs < STALE_THRESHOLD_MS) truckData.garbage = redisFallback;
-    }
+    truckData.garbage = await getRecentTruckFallback(routeId, "0");
   }
   if (!truckData.recycling) {
-    const recFallback = await getTruckLiveData(`${nearestStop.route_id}:1`);
-    if (recFallback) {
-      const ageMs = now_fallback - new Date(recFallback.updated_at).getTime();
-      if (ageMs < STALE_THRESHOLD_MS) truckData.recycling = recFallback;
-    }
-  }
-
-  // Fix 3: If primary route has no active truck, try alternative routes within 100m
-  if (!truckData.garbage && !truckData.recycling) {
-    for (const altStop of nearestStops.slice(1)) {
-      if (altStop.route_id === nearestStop.route_id) continue;
-      const altDistM = haversineDistance(userLat, userLng, altStop.lat, altStop.lng) * 1000;
-      if (altDistM > ALT_ROUTE_RADIUS_M) continue;
-
-      const altData = await syncSingleTruckFromHccg(altStop.route_id).catch(() => ({
-        garbage: null, recycling: null,
-      }));
-      if (altData.garbage || altData.recycling) {
-        console.log(`[TruckService] Switched to alt route ${altStop.route_id} (${altDistM.toFixed(0)}m away)`);
-        nearestStop = altStop;
-        truckData = altData;
-        break;
-      }
-    }
+    truckData.recycling = await getRecentTruckFallback(routeId, "1");
   }
 
   const garbageTruck = truckData.garbage;
   const recyclingTruck = truckData.recycling;
-  
-  const historicalAvg = await getHistoricalAverage(nearestStop.route_id, nearestStop.sequence_order);
-  const avgStr = historicalAvg ? `\n📊 歷史平均：約 ${historicalAvg}` : "";
 
-  if (!garbageTruck && !recyclingTruck) {
-    const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
-    return {
-      found: false,
-      message: `⚠️ 今日目前無法取得此區域垃圾車的即時 GPS 訊號。\n\n` +
-               `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 官方表定時間：${timeStr}${avgStr}\n\n` +
-               `💡 注意：即使顯示無訊號，昨日垃圾車仍可能正常出動。\n` +
-               `此查詢結果為當下即時訊號，建議在表定時間前 30 分鐘再次查詢！`,
-    };
-  }
+  const garbageEtaMinutes =
+    candidate.garbageEtaMinutes ??
+    (garbageTruck
+      ? estimateEtaFromTruck(garbageTruck, stopLat, stopLng, targetSequence)
+      : undefined);
 
-  if (!garbageTruck) {
-    const timeStr = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
-    return {
-      found: true,
-      routeId: nearestStop.route_id,
-      nearestStopName: nearestStop.point_name ?? undefined,
-      nearestStopAddress: nearestStop.address ?? undefined,
-      stopLat: nearestStop.lat,
-      stopLng: nearestStop.lng,
-      userLat,
-      userLng,
-      scheduledTime: timeStr,
-      historicalAvgTime: historicalAvg,
-      message: `📍 找到最近的清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `🕐 官方表定 (僅供參考)：${timeStr}${avgStr}\n` +
-               `⚠️ 目前無法取得垃圾車的即時 GPS 訊號（可能尚未出車或訊號中斷），請稍後再查詢。`,
-    };
-  }
+  const recyclingEtaMinutes =
+    candidate.recyclingEtaMinutes ??
+    (recyclingTruck
+      ? estimateEtaFromTruck(recyclingTruck, stopLat, stopLng, targetSequence)
+      : undefined);
 
-  // Check if truck GPS is stale
-  const now = new Date();
+  const isGarbagePassed =
+    candidate.garbageEtaMinutes === undefined &&
+    (garbageTruck
+      ? garbageTruck.heading_to_stop_sequence > targetSequence
+      : candidate.minutesUntilScheduled !== null &&
+        candidate.minutesUntilScheduled < -30);
 
-  // FIX: Identify if today is a valid service day, or if truck has already passed
-  const formattedTime = nearestStop.scheduled_time ? nearestStop.scheduled_time.slice(0, 5) : "未知";
-  
-  let isGarbagePassed = false;
-  let isRecyclePassed = false;
-  
-  if (garbageTruck) {
-    if (garbageTruck.heading_to_stop_sequence > nearestStop.sequence_order) {
-      isGarbagePassed = true;
-    }
-  } else if (nearestStop.scheduled_time) {
-    const [h, m] = nearestStop.scheduled_time.split(':').map(Number);
-    const stopMins = h * 60 + m;
-    const currentMins = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes();
-    if (currentMins > stopMins + 30) {
-      isGarbagePassed = true; // No truck, and it's 30+ mins past scheduled time
-    }
-  }
+  const isRecyclePassed =
+    candidate.recyclingEtaMinutes === undefined &&
+    (recyclingTruck
+      ? recyclingTruck.heading_to_stop_sequence > targetSequence
+      : candidate.minutesUntilScheduled !== null &&
+        candidate.minutesUntilScheduled < -30);
 
-  if (recyclingTruck) {
-    if (recyclingTruck.heading_to_stop_sequence > nearestStop.sequence_order) {
-      isRecyclePassed = true;
-    }
-  } else if (nearestStop.scheduled_time) {
-    const [h, m] = nearestStop.scheduled_time.split(':').map(Number);
-    const stopMins = h * 60 + m;
-    const currentMins = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes();
-    if (currentMins > stopMins + 30) {
-      isRecyclePassed = true;
-    }
-  }
+  const nextGarbageInfo = getNextScheduledArrival(
+    point.trashDay,
+    candidate.scheduledTime,
+    isGarbagePassed,
+    [...DEFAULT_GARBAGE_DAYS]
+  );
+  const nextRecycleInfo = getNextScheduledArrival(
+    point.recycleDay,
+    candidate.scheduledTime,
+    isRecyclePassed
+  );
 
-  // Default garbage days in Hsinchu
-  const nextGarbageInfo = getNextScheduledArrival(nearestStop.trash_day, formattedTime, isGarbagePassed, [1, 2, 4, 5, 6]);
-  
-  // Default recycling days: usually we don't know without route schedule, but if empty, maybe it's not serviced.
-  // We can just rely on the API or if empty return null for recycling.
-  const nextRecycleInfo = getNextScheduledArrival(nearestStop.recycle_day, formattedTime, isRecyclePassed);
+  if (
+    garbageEtaMinutes === undefined &&
+    recyclingEtaMinutes === undefined &&
+    (!nextGarbageInfo || !nextGarbageInfo.isToday) &&
+    (!nextRecycleInfo || !nextRecycleInfo.isToday)
+  ) {
+    const nextGarbageText = nextGarbageInfo
+      ? `\n🚛 下次垃圾車：${nextGarbageInfo.dateStr}`
+      : "";
+    const nextRecycleText = nextRecycleInfo
+      ? `\n♻️ 下次回收車：${nextRecycleInfo.dateStr}`
+      : "";
+    const historicalText = historicalReference
+      ? `\n📊 歷史平均：約 ${historicalReference}`
+      : "";
 
-  // If both are not coming today (or already passed), we just return next schedules!
-  if ((!nextGarbageInfo || !nextGarbageInfo.isToday) && (!nextRecycleInfo || !nextRecycleInfo.isToday)) {
-    const gMsg = nextGarbageInfo ? `\n🚛 下次垃圾車：${nextGarbageInfo.dateStr}` : "";
-    const rMsg = nextRecycleInfo ? `\n♻️ 下次回收車：${nextRecycleInfo.dateStr}` : "";
-    
     return {
       found: true,
-      routeId: nearestStop.route_id,
-      nearestStopName: nearestStop.point_name ?? undefined,
-      nearestStopAddress: nearestStop.address ?? undefined,
-      stopLat: nearestStop.lat,
-      stopLng: nearestStop.lng,
+      routeId,
+      routeName: point.routeName,
+      nearestStopName: point.pointName || undefined,
+      nearestStopAddress: point.address || undefined,
+      stopLat,
+      stopLng,
       userLat,
       userLng,
       scheduledTime: formattedTime,
-      historicalAvgTime: historicalAvg,
+      historicalAvgTime: historicalReference,
       nextGarbageDate: nextGarbageInfo?.dateStr,
       nextRecycleDate: nextRecycleInfo?.dateStr,
       isGarbagePassed,
       isRecyclePassed,
-      message: `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-               `⚠️ 今日無班次或已過站。${gMsg}${rMsg}`,
+      message:
+        `📍 最近清運點：${stopName}\n` +
+        `🕐 官方表定：${formattedTime}${historicalText}` +
+        `${nextGarbageText}${nextRecycleText}`,
     };
   }
 
-  // Step 3: compute intermediate stops between truck's current seq and target stop seq
-  const garbageSeq = garbageTruck.heading_to_stop_sequence;
-  const targetSeq = nearestStop.sequence_order;
-  const garbageIntermediateStops = Math.max(0, targetSeq - garbageSeq - 1);
-
-  // Step 4: compute straight-line distance truck → target stop
-  const garbageDistKm = haversineDistance(
-    garbageTruck.lat,
-    garbageTruck.lng,
-    nearestStop.lat,
-    nearestStop.lng
-  );
-
-  const garbageEtaMinutes = estimateEtaMinutes(
-    garbageDistKm,
-    garbageIntermediateStops,
-    config.hsinchu.avgSpeedKmh,
-    config.hsinchu.stopDwellSeconds
-  );
-
-  // Calculate for recycling truck if exists
-  let recyclingEtaMinutes: number | undefined = undefined;
-  if (recyclingTruck) {
-    const recSeq = recyclingTruck.heading_to_stop_sequence;
-    const recIntermediate = Math.max(0, targetSeq - recSeq - 1);
-    const recDist = haversineDistance(
-      recyclingTruck.lat,
-      recyclingTruck.lng,
-      nearestStop.lat,
-      nearestStop.lng
-    );
-    recyclingEtaMinutes = estimateEtaMinutes(
-      recDist,
-      recIntermediate,
-      config.hsinchu.avgSpeedKmh,
-      config.hsinchu.stopDwellSeconds
-    );
-  }
-
-  // now was already declared for isStale check
-  
-  // Async log to database for garbage truck
+  const now = new Date();
   const db = getSupabaseClient();
-  db.from("eta_logs").insert({
-    route_id: nearestStop.route_id,
-    stop_id: nearestStop.sequence_order,
-    car_no: garbageTruck.car_no,
-    user_lat: userLat,
-    user_lng: userLng,
-    estimated_eta_minutes: garbageEtaMinutes,
-    predicted_arrival_time: new Date(now.getTime() + garbageEtaMinutes * 60000).toISOString(),
-    car_type: "0"
-  }).then(({error}) => {
-    if (error) console.error("[TruckService] Failed to insert garbage eta_log:", error.message);
-  });
 
-  // Async log to database for recycling truck
-  if (recyclingTruck && recyclingEtaMinutes !== undefined) {
-    db.from("eta_logs").insert({
-      route_id: nearestStop.route_id,
-      stop_id: nearestStop.sequence_order,
-      car_no: recyclingTruck.car_no,
-      user_lat: userLat,
-      user_lng: userLng,
-      estimated_eta_minutes: recyclingEtaMinutes,
-      predicted_arrival_time: new Date(now.getTime() + recyclingEtaMinutes * 60000).toISOString(),
-      car_type: "1"
-    }).then(({error}) => {
-      if (error) console.error("[TruckService] Failed to insert recycling eta_log:", error.message);
-    });
+  if (garbageEtaMinutes !== undefined) {
+    db.from("eta_logs")
+      .insert({
+        route_id: routeId,
+        stop_id: targetSequence,
+        car_no: (garbageTruck?.car_no ?? point.carNo) || null,
+        user_lat: userLat,
+        user_lng: userLng,
+        estimated_eta_minutes: garbageEtaMinutes,
+        predicted_arrival_time: new Date(
+          now.getTime() + garbageEtaMinutes * 60000
+        ).toISOString(),
+        car_type: "0",
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error(
+            "[TruckService] Failed to insert garbage eta_log:",
+            error.message
+          );
+        }
+      });
   }
 
-  // Basic message fallback (will be overridden by Line Service Flex Message anyway)
-  const message = `📍 最近清運點：${nearestStop.point_name ?? nearestStop.address}\n` +
-                  `🕐 官方表定：${formattedTime}${avgStr}\n` +
-                  `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘` +
-                  (recyclingEtaMinutes !== undefined ? `\n♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘` : "");
+  if (recyclingEtaMinutes !== undefined) {
+    db.from("eta_logs")
+      .insert({
+        route_id: routeId,
+        stop_id: targetSequence,
+        car_no: (recyclingTruck?.car_no ?? point.rcarNo) || null,
+        user_lat: userLat,
+        user_lng: userLng,
+        estimated_eta_minutes: recyclingEtaMinutes,
+        predicted_arrival_time: new Date(
+          now.getTime() + recyclingEtaMinutes * 60000
+        ).toISOString(),
+        car_type: "1",
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error(
+            "[TruckService] Failed to insert recycling eta_log:",
+            error.message
+          );
+        }
+      });
+  }
+
+  const messageLines = [
+    `📍 最近清運點：${stopName}`,
+    `🕐 官方表定：${formattedTime}`,
+    historicalReference ? `📊 歷史平均：約 ${historicalReference}` : null,
+    garbageEtaMinutes !== undefined
+      ? `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘`
+      : nextGarbageInfo && !nextGarbageInfo.isToday
+        ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}`
+        : "⚠️ 垃圾車目前沒有可用的即時 ETA",
+    recyclingEtaMinutes !== undefined
+      ? `♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘`
+      : nextRecycleInfo && !nextRecycleInfo.isToday
+        ? `♻️ 下次回收車：${nextRecycleInfo.dateStr}`
+        : null,
+  ].filter((line): line is string => Boolean(line));
 
   return {
     found: true,
-    routeId: nearestStop.route_id,
-    nearestStopName: nearestStop.point_name ?? undefined,
-    nearestStopAddress: nearestStop.address ?? undefined,
-    stopLat: nearestStop.lat,
-    stopLng: nearestStop.lng,
+    routeId,
+    routeName: point.routeName,
+    nearestStopName: point.pointName || undefined,
+    nearestStopAddress: point.address || undefined,
+    stopLat,
+    stopLng,
     userLat,
     userLng,
     etaMinutes: garbageEtaMinutes,
-    carNo: garbageTruck.car_no,
-    truckLat: garbageTruck.lat,
-    truckLng: garbageTruck.lng,
-    recyclingCarNo: recyclingTruck?.car_no,
+    carNo: (garbageTruck?.car_no ?? point.carNo) || undefined,
+    truckLat: garbageTruck?.lat,
+    truckLng: garbageTruck?.lng,
+    recyclingCarNo: (recyclingTruck?.car_no ?? point.rcarNo) || undefined,
     recyclingTruckLat: recyclingTruck?.lat,
     recyclingTruckLng: recyclingTruck?.lng,
     recyclingEtaMinutes,
     scheduledTime: formattedTime,
-    historicalAvgTime: historicalAvg,
-    nextGarbageDate: nextGarbageInfo?.dateStr,
-    nextRecycleDate: nextRecycleInfo?.dateStr,
+    historicalAvgTime: historicalReference,
+    nextGarbageDate: nextGarbageInfo?.isToday ? undefined : nextGarbageInfo?.dateStr,
+    nextRecycleDate: nextRecycleInfo?.isToday ? undefined : nextRecycleInfo?.dateStr,
     isGarbagePassed,
     isRecyclePassed,
-    message,
-    isStale: false, // Legacy fields
-    staleMinutes: 0
+    message: messageLines.join("\n"),
+    isStale: false,
+    staleMinutes: 0,
   } as EtaResult & { isStale?: boolean; staleMinutes?: number };
 }
 
