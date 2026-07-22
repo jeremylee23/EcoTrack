@@ -130,6 +130,7 @@ async function replyEtaNow(
   const eta = await calculateEta(coords.lat, coords.lng, {
     locateMode: prefs.locateMode,
     radiusMeters: prefs.radiusMeters,
+    homeAddress: coords.address,
   });
   const prefixParts: string[] = [];
   if (notice) prefixParts.push(notice);
@@ -211,6 +212,7 @@ async function handleLocationMessage(
       ? await calculateEta(coords.lat, coords.lng, {
           locateMode: prefsAfter.locateMode,
           radiusMeters: prefsAfter.radiusMeters,
+          homeAddress: coords.address || fullAddress,
         })
       : null;
 
@@ -653,6 +655,7 @@ async function handleTextMessage(
     const guide = await getNearbyStopsGuide(coords.lat, coords.lng, {
       radiusMeters: prefs.radiusMeters,
       locateMode: "all_day",
+      homeAddress: coords.address,
     });
     const header = buildTextMessage(
       `📍 以「${coords.label}」為中心` +
@@ -675,6 +678,7 @@ async function handleTextMessage(
     const card = await getScheduleCardForLocation(coords.lat, coords.lng, {
       locateMode: prefs.locateMode,
       radiusMeters: prefs.radiusMeters,
+      homeAddress: coords.address,
     });
     await replyMessage(replyToken, [withQuickReply(buildTextMessage(card))]);
     return;

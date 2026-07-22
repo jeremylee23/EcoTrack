@@ -190,6 +190,8 @@ export interface EtaResult {
   recycleDays?: string;
   locateMode?: "recommend" | "all_day";
   radiusMeters?: number;
+  /** Home/doorplate address — used to prefer same-street main-road stops */
+  homeAddress?: string;
   /** Nearby uncleared / pending stops for map overlay */
   nearbyUncleared?: Array<{
     name: string;

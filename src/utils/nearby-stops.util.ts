@@ -13,6 +13,10 @@ export interface RankableStop {
   minutesUntilScheduled: number | null;
   hasTodayService: boolean;
   status: NearbyStopStatus;
+  /** Same-street / main-road affinity (higher = better for this home) */
+  streetScore?: number;
+  /** Area next-arrival sort key (smaller = sooner); used when today is done */
+  nextSortKey?: number;
 }
 
 export function isStopStillUsefulToday(stop: RankableStop): boolean {
@@ -29,11 +33,14 @@ export function soonestSortKey(stop: RankableStop): number {
   return Number.POSITIVE_INFINITY;
 }
 
+function streetScoreOf(stop: RankableStop): number {
+  return stop.streetScore ?? 0;
+}
+
 /**
  * Pick recommendation:
- * 1) Soonest still-useful stop (live/upcoming)
- * 2) Else nearest still-useful
- * 3) Else nearest overall (likely no_service / passed → show next day elsewhere)
+ * 1) Still-useful today: soonest, then same-street / main-road, then nearest
+ * 2) Else earliest next arrival in the area, then street, then nearest
  */
 export function recommendNearbyStop<T extends RankableStop>(
   stops: T[]
@@ -43,26 +50,60 @@ export function recommendNearbyStop<T extends RankableStop>(
   const useful = stops.filter(isStopStillUsefulToday);
   if (useful.length > 0) {
     const bySoonest = [...useful].sort(
-      (a, b) => soonestSortKey(a) - soonestSortKey(b) || a.distanceMeters - b.distanceMeters
+      (a, b) =>
+        soonestSortKey(a) - soonestSortKey(b) ||
+        streetScoreOf(b) - streetScoreOf(a) ||
+        a.distanceMeters - b.distanceMeters
     );
     const soonest = bySoonest[0];
+
+    // Prefer same-street main-road when it is not meaningfully later.
+    const byStreetThenNear = [...useful].sort(
+      (a, b) =>
+        streetScoreOf(b) - streetScoreOf(a) ||
+        a.distanceMeters - b.distanceMeters ||
+        soonestSortKey(a) - soonestSortKey(b)
+    );
+    const streetBest = byStreetThenNear[0];
+    if (
+      streetBest &&
+      streetScoreOf(streetBest) >= 100 &&
+      streetScoreOf(streetBest) > streetScoreOf(soonest) &&
+      soonestSortKey(streetBest) <= soonestSortKey(soonest) + 45 &&
+      streetBest.distanceMeters <= soonest.distanceMeters + 120
+    ) {
+      return {
+        stop: streetBest,
+        reason: "同路段主街清運點（車會經過，不必走進巷內）",
+      };
+    }
+
     const nearestUseful = [...useful].sort(
-      (a, b) => a.distanceMeters - b.distanceMeters
+      (a, b) =>
+        a.distanceMeters - b.distanceMeters ||
+        streetScoreOf(b) - streetScoreOf(a)
     )[0];
 
-    // If nearest already passed but 2nd is useful — soonest path handles it.
-    // Prefer soonest when it is meaningfully different from pure nearest.
     if (
       soonest.id !== nearestUseful.id &&
       soonestSortKey(soonest) + 5 < soonestSortKey(nearestUseful)
     ) {
+      // Still avoid alley if street main-road is close enough in time
+      if (
+        streetScoreOf(streetBest) > streetScoreOf(soonest) &&
+        soonestSortKey(streetBest) <= soonestSortKey(soonest) + 20
+      ) {
+        return {
+          stop: streetBest,
+          reason: "同路段清運點，時間也接近",
+        };
+      }
       return {
         stop: soonest,
         reason: "下次最快到來（含距離）",
       };
     }
 
-    // Nearest useful; if nearest overall was passed, this is "第二近還能等"
     const nearestOverall = [...stops].sort(
       (a, b) => a.distanceMeters - b.distanceMeters
     )[0];
@@ -76,14 +117,42 @@ export function recommendNearbyStop<T extends RankableStop>(
       };
     }
 
+    if (
+      streetScoreOf(nearestUseful) >= 100 &&
+      streetScoreOf(nearestUseful) > streetScoreOf(soonest)
+    ) {
+      return {
+        stop: nearestUseful,
+        reason: "同路段最近清運點",
+      };
+    }
+
     return {
       stop: nearestUseful,
       reason: "最近且今日還能等",
     };
   }
 
+  // Today done: pick earliest next arrival in the area (not nearest evening pin).
+  const withNext = stops.filter((s) => s.nextSortKey !== undefined);
+  if (withNext.length > 0) {
+    const earliest = [...withNext].sort(
+      (a, b) =>
+        (a.nextSortKey ?? Number.POSITIVE_INFINITY) -
+          (b.nextSortKey ?? Number.POSITIVE_INFINITY) ||
+        streetScoreOf(b) - streetScoreOf(a) ||
+        a.distanceMeters - b.distanceMeters
+    )[0];
+    return {
+      stop: earliest,
+      reason: "附近下次最早的班（含下午／其他路線）",
+    };
+  }
+
   const nearest = [...stops].sort(
-    (a, b) => a.distanceMeters - b.distanceMeters
+    (a, b) =>
+      streetScoreOf(b) - streetScoreOf(a) ||
+      a.distanceMeters - b.distanceMeters
   )[0];
   return {
     stop: nearest,

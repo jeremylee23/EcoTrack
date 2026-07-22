@@ -52,6 +52,67 @@ export function formatWeekSchedule(options: {
   );
 }
 
+/** Area-wide schedule: show multiple nearby stops so afternoon isn't hidden. */
+export function formatAreaWeekSchedule(options: {
+  radiusMeters: number;
+  homeAddress?: string;
+  earliestNext?: string;
+  stops: Array<{
+    name: string;
+    distanceMeters: number;
+    scheduledTime: string | null;
+    trashDays: string | null | undefined;
+    nextArrival?: string;
+    streetScore?: number;
+  }>;
+}): string {
+  const label = options.homeAddress?.trim()
+    ? `以「${options.homeAddress.trim()}」附近`
+    : `方圓約 ${options.radiusMeters}m`;
+
+  // Prefer same-street rows first, then by scheduled clock.
+  const sorted = [...options.stops].sort((a, b) => {
+    const sa = a.streetScore ?? 0;
+    const sb = b.streetScore ?? 0;
+    if (sb !== sa) return sb - sa;
+    const ta = a.scheduledTime ?? "99:99";
+    const tb = b.scheduledTime ?? "99:99";
+    return ta.localeCompare(tb);
+  });
+
+  // Dedupe identical name+time
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const s of sorted) {
+    const key = `${s.name}|${s.scheduledTime ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const days = parseDayList(s.trashDays);
+    const dayText =
+      days.length > 0
+        ? days.map((d) => `週${DAY_NAMES[d]}`).join("、")
+        : "日別未知";
+    lines.push(
+      `• ${s.name}（${s.distanceMeters}m）\n` +
+        `  ${s.scheduledTime ?? "時間未知"}｜${dayText}` +
+        (s.nextArrival ? `\n  下次 ${s.nextArrival}` : "")
+    );
+    if (lines.length >= 8) break;
+  }
+
+  return (
+    `📅 附近清運班表（含下午／晚上多班）\n` +
+    `📍 ${label}\n` +
+    (options.earliestNext
+      ? `⭐ 下次最早：${options.earliestNext}\n`
+      : "") +
+    `\n` +
+    lines.join("\n") +
+    `\n\n💡 同一條街常有多個時間／路線；以「下次最早」為準最不容易錯過。\n` +
+    `傳「垃圾車」可看即時；靠近 5 分鐘會推播。`
+  );
+}
+
 export function buildNoServiceTodayMessage(options: {
   stopName: string;
   weekday: number; // 1=Mon..7=Sun

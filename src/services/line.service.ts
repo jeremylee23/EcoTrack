@@ -1015,6 +1015,7 @@ export function buildNearbyStopsFlex(guide: {
   userLat: number;
   userLng: number;
   recommendReason: string;
+  areaNextArrival?: string;
   recommend: {
     id: string;
     name: string;
@@ -1192,6 +1193,19 @@ export function buildNearbyStopsFlex(guide: {
               wrap: true,
               margin: "sm",
             },
+            ...(guide.areaNextArrival || rec.nextArrival
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `附近下次最早：${guide.areaNextArrival || rec.nextArrival}`,
+                    size: "md" as const,
+                    color: "#b45309",
+                    weight: "bold" as const,
+                    wrap: true,
+                    margin: "md" as const,
+                  },
+                ]
+              : []),
             {
               type: "text",
               text: guide.recommendReason,
@@ -1204,7 +1218,7 @@ export function buildNearbyStopsFlex(guide: {
         },
         {
           type: "text",
-          text: "往右滑看其他點（顏色：綠可倒、藍還能等、灰已過）",
+          text: "往右滑看其他點。同街常有下午＋晚上；主街可倒就不必進巷。",
           size: "sm",
           color: "#6b7280",
           align: "center",

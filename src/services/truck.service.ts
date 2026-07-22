@@ -33,8 +33,10 @@ import {
   type EtaSource,
 } from "../utils/eta-policy.util.js";
 import { clampRadiusMeters, type LocateMode } from "./prefs.service.js";
-import { formatWeekSchedule } from "./schedule.service.js";
+import { formatAreaWeekSchedule } from "./schedule.service.js";
 import { recommendNearbyStop } from "../utils/nearby-stops.util.js";
+import { streetAffinityScore } from "../utils/street-match.util.js";
+import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -70,6 +72,8 @@ const ALT_ROUTE_RADIUS_M = 100;
 export interface CalculateEtaOptions {
   locateMode?: LocateMode;
   radiusMeters?: number;
+  /** Doorplate — prefer same-street main-road pins over nearer alleys */
+  homeAddress?: string;
 }
 
 function buildSearchRadii(preferredMeters: number): number[] {
@@ -480,31 +484,93 @@ export async function searchCleanPointsByKeyword(
 
 /**
  * Build a weekly schedule card for the user's coordinate.
+ * Lists nearby stops' times (area-wide) so afternoon routes aren't hidden
+ * behind a single evening pin.
  */
 export async function getScheduleCardForLocation(
   userLat: number,
   userLng: number,
   options: CalculateEtaOptions = {}
 ): Promise<string> {
-  const candidate = await selectNearbyCandidate(userLat, userLng, options);
-  if (!candidate) {
+  const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
+  // Expand a bit so we see afternoon + evening pins on the same street.
+  const searchRadius = Math.max(radiusMeters, 200);
+  const candidates = await selectNearbyCandidates(userLat, userLng, {
+    ...options,
+    locateMode: "all_day",
+    radiusMeters: searchRadius,
+  });
+
+  const inRange = candidates
+    .filter((c) => c.distanceMeters <= searchRadius)
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  if (inRange.length === 0) {
     return "⚠️ 附近找不到清運點，請先傳送 GPS 或傳「查 路名」搜尋。";
   }
 
-  const historicalAvg =
-    parseInt(candidate.point.seq, 10) > 0
-      ? await getHistoricalAverage(
-          candidate.point.routeId,
-          parseInt(candidate.point.seq, 10)
-        )
-      : undefined;
+  const homeAddress = options.homeAddress;
+  const ranked = [...inRange].sort((a, b) => {
+    const sa = streetAffinityScore(
+      homeAddress,
+      a.point.pointName || "",
+      a.point.address || ""
+    );
+    const sb = streetAffinityScore(
+      homeAddress,
+      b.point.pointName || "",
+      b.point.address || ""
+    );
+    return sb - sa || a.distanceMeters - b.distanceMeters;
+  });
 
-  return formatWeekSchedule({
-    stopName: candidate.point.pointName || candidate.point.address,
-    scheduledTime: candidate.scheduledTime,
-    trashDays: candidate.point.trashDay,
-    recycleDays: candidate.point.recycleDay,
-    historicalAvgTime: (historicalAvg ?? candidate.point.historyTime) || undefined,
+  const rows = ranked.slice(0, 10).map((c) => {
+    const name = c.point.pointName || c.point.address || "清運點";
+    const next = getNextScheduledArrival(
+      c.point.trashDay,
+      c.scheduledTime,
+      isSchedulePastGrace(
+        c.hasTodayGarbage,
+        c.minutesUntilScheduled
+      ),
+      [...DEFAULT_GARBAGE_DAYS]
+    );
+    return {
+      name,
+      distanceMeters: Math.round(c.distanceMeters),
+      scheduledTime: c.scheduledTime,
+      trashDays: c.point.trashDay,
+      recycleDays: c.point.recycleDay,
+      nextArrival: next?.dateStr,
+      streetScore: streetAffinityScore(
+        homeAddress,
+        c.point.pointName || "",
+        c.point.address || ""
+      ),
+    };
+  });
+
+  const earliest = pickEarliestNextArrival(
+    ranked.map((c) => ({
+      id: `${c.point.routeId}:${c.point.seq}`,
+      name: c.point.pointName || c.point.address || "清運點",
+      daysString: c.point.trashDay,
+      scheduledTime: c.scheduledTime,
+      hasPassedToday: isSchedulePastGrace(
+        c.hasTodayGarbage,
+        c.minutesUntilScheduled
+      ),
+      defaultDays: [...DEFAULT_GARBAGE_DAYS],
+    }))
+  );
+
+  return formatAreaWeekSchedule({
+    radiusMeters: searchRadius,
+    homeAddress,
+    earliestNext: earliest
+      ? `${earliest.dateStr}（${earliest.stopName}）`
+      : undefined,
+    stops: rows,
   });
 }
 
@@ -529,6 +595,8 @@ export interface NearbyStopsGuide {
   userLng: number;
   recommend: NearbyStopGuideItem | null;
   recommendReason: string;
+  /** Earliest next garbage pickup among nearby stops (may differ from recommend) */
+  areaNextArrival?: string;
   nearest: NearbyStopGuideItem | null;
   soonest: NearbyStopGuideItem | null;
   stops: NearbyStopGuideItem[];
@@ -588,8 +656,8 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
 }
 
 /**
- * List clean points near a target (default 100m) with times, and recommend:
- * nearest usable / soonest / fallback when nearest already passed.
+ * List clean points near a target with times, and recommend:
+ * same-street main-road when possible; area-wide earliest next when today is done.
  */
 export async function getNearbyStopsGuide(
   userLat: number,
@@ -597,21 +665,22 @@ export async function getNearbyStopsGuide(
   options: CalculateEtaOptions = {}
 ): Promise<NearbyStopsGuide> {
   const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
+  // Widen slightly so afternoon + evening pins on the same street stay visible.
+  const searchRadius = Math.max(radiusMeters, 150);
+  const homeAddress = options.homeAddress;
   const candidates = await selectNearbyCandidates(userLat, userLng, {
     ...options,
-    // Listing works best with all_day so we see every stop in range, then rank ourselves.
     locateMode: options.locateMode ?? "all_day",
-    radiusMeters,
+    radiusMeters: searchRadius,
   });
 
   const inRange = candidates
-    .filter((c) => c.distanceMeters <= radiusMeters)
+    .filter((c) => c.distanceMeters <= searchRadius)
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
-  // If nothing in preferred radius, fall back to closest few from expanded search.
-  const pool = (inRange.length > 0 ? inRange : candidates.slice(0, 5)).slice(
+  const pool = (inRange.length > 0 ? inRange : candidates.slice(0, 8)).slice(
     0,
-    8
+    12
   );
   const stops = pool.map(candidateToGuideItem);
 
@@ -631,6 +700,34 @@ export async function getNearbyStopsGuide(
     };
   }
 
+  const areaEarliest = pickEarliestNextArrival(
+    pool.map((c, i) => ({
+      id: stops[i].id,
+      name: stops[i].name,
+      daysString: c.point.trashDay,
+      scheduledTime: c.scheduledTime,
+      hasPassedToday:
+        stops[i].status === "passed" || stops[i].status === "no_service",
+      defaultDays: [...DEFAULT_GARBAGE_DAYS],
+    }))
+  );
+
+  const nextKeyById = new Map<string, number>();
+  for (let i = 0; i < stops.length; i++) {
+    const one = pickEarliestNextArrival([
+      {
+        id: stops[i].id,
+        name: stops[i].name,
+        daysString: pool[i].point.trashDay,
+        scheduledTime: stops[i].scheduledTime,
+        hasPassedToday:
+          stops[i].status === "passed" || stops[i].status === "no_service",
+        defaultDays: [...DEFAULT_GARBAGE_DAYS],
+      },
+    ]);
+    if (one) nextKeyById.set(stops[i].id, one.sortKey);
+  }
+
   const pick = recommendNearbyStop(
     stops.map((s) => ({
       id: s.id,
@@ -639,12 +736,42 @@ export async function getNearbyStopsGuide(
       minutesUntilScheduled: s.minutesUntilScheduled,
       hasTodayService: s.status !== "no_service",
       status: s.status,
+      streetScore: streetAffinityScore(homeAddress, s.name, s.address),
+      nextSortKey: nextKeyById.get(s.id),
     }))
   );
 
-  const recommend =
+  let recommend =
     (pick && stops.find((s) => s.id === pick.stop.id)) || stops[0];
-  const recommendReason = pick?.reason ?? "最近清運點";
+  let recommendReason = pick?.reason ?? "最近清運點";
+
+  // Surface area-wide earliest next on the recommend card (don't hide afternoon).
+  if (
+    areaEarliest &&
+    (!recommend.nextArrival ||
+      areaEarliest.dateStr !== recommend.nextArrival)
+  ) {
+    recommend = {
+      ...recommend,
+      nextArrival: areaEarliest.dateStr,
+    };
+    if (
+      areaEarliest.stopId !== recommend.id &&
+      (recommend.status === "passed" || recommend.status === "no_service")
+    ) {
+      const better = stops.find((s) => s.id === areaEarliest.stopId);
+      if (better) {
+        recommend = {
+          ...better,
+          nextArrival: areaEarliest.dateStr,
+        };
+        recommendReason = `附近下次最早在「${better.name}」`;
+      }
+    } else if (areaEarliest.stopId !== recommend.id) {
+      recommendReason =
+        `${recommendReason}；附近最早班次：${areaEarliest.dateStr}（${areaEarliest.stopName}）`;
+    }
+  }
 
   const nearest = [...stops].sort(
     (a, b) => a.distanceMeters - b.distanceMeters
@@ -659,12 +786,16 @@ export async function getNearbyStopsGuide(
     })[0] ?? null;
 
   const lines = [
-    `📍 方圓 ${radiusMeters}m 清運點（共 ${stops.length} 處）`,
+    `📍 方圓 ${searchRadius}m 清運點（共 ${stops.length} 處）`,
     ``,
     `⭐ 建議：${recommend.name}（${recommend.distanceMeters}m）`,
     `   ${recommendReason}`,
     `   表定 ${recommend.scheduledTime ?? "未知"}｜${recommend.statusLabel}`,
-    recommend.nextArrival ? `   下次：${recommend.nextArrival}` : null,
+    areaEarliest
+      ? `   附近下次最早：${areaEarliest.dateStr}（${areaEarliest.stopName}）`
+      : recommend.nextArrival
+        ? `   下次：${recommend.nextArrival}`
+        : null,
     ``,
     `清單：`,
     ...stops.map((s, i) => {
@@ -681,15 +812,16 @@ export async function getNearbyStopsGuide(
     nearest && soonestUseful && nearest.id !== soonestUseful.id
       ? `📌 最近：${nearest.name}（${nearest.distanceMeters}m）｜最快：${soonestUseful.name}（${soonestUseful.distanceMeters}m）`
       : null,
-    `💡 很多路段是「沿路收」，不一定有官方清運點旗子；點「垃圾車」看地圖藍線（車會經過的路）。`,
+    `💡 同一條街常有下午＋晚上多班；以「附近下次最早」為準。車常沿主街收，不必走進巷內。`,
   ].filter((line): line is string => line !== null);
 
   return {
-    radiusMeters,
+    radiusMeters: searchRadius,
     userLat,
     userLng,
     recommend,
     recommendReason,
+    areaNextArrival: areaEarliest?.dateStr,
     nearest,
     soonest: soonestUseful,
     stops,
@@ -807,11 +939,41 @@ export async function calculateEta(
 ): Promise<EtaResult> {
   const locateMode = options.locateMode ?? "recommend";
   const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
+  const homeAddress = options.homeAddress;
   const candidates = await selectNearbyCandidates(userLat, userLng, {
     locateMode,
-    radiusMeters,
+    radiusMeters: Math.max(radiusMeters, 150),
   });
+
+  // Prefer same-street main-road pin over a slightly closer alley pin.
   let candidate = candidates[0];
+  if (homeAddress && candidates.length > 1) {
+    const ranked = [...candidates].sort((a, b) => {
+      const sa = streetAffinityScore(
+        homeAddress,
+        a.point.pointName || "",
+        a.point.address || ""
+      );
+      const sb = streetAffinityScore(
+        homeAddress,
+        b.point.pointName || "",
+        b.point.address || ""
+      );
+      return sb - sa || a.distanceMeters - b.distanceMeters;
+    });
+    const best = ranked[0];
+    const bestScore = streetAffinityScore(
+      homeAddress,
+      best.point.pointName || "",
+      best.point.address || ""
+    );
+    if (
+      bestScore >= 100 &&
+      best.distanceMeters <= (candidates[0]?.distanceMeters ?? 0) + 120
+    ) {
+      candidate = best;
+    }
+  }
 
   if (!candidate) {
     return {
@@ -892,17 +1054,33 @@ export async function calculateEta(
 
   // Beat official banner: explicit no-service day with next pickup.
   if (!candidate.hasTodayGarbage && !candidate.hasTodayRecycling) {
-    const nextGarbageInfo = getNextScheduledArrival(
-      point.trashDay,
-      candidate.scheduledTime,
-      true,
-      [...DEFAULT_GARBAGE_DAYS]
+    const areaNext = pickEarliestNextArrival(
+      candidates.slice(0, 15).map((c) => ({
+        id: `${c.point.routeId}:${c.point.seq}`,
+        name: c.point.pointName || c.point.address || "清運點",
+        daysString: c.point.trashDay,
+        scheduledTime: c.scheduledTime,
+        hasPassedToday: true,
+        defaultDays: [...DEFAULT_GARBAGE_DAYS],
+      }))
     );
+    const nextGarbageInfo = areaNext
+      ? { dateStr: areaNext.dateStr, isToday: areaNext.isToday }
+      : getNextScheduledArrival(
+          point.trashDay,
+          candidate.scheduledTime,
+          true,
+          [...DEFAULT_GARBAGE_DAYS]
+        );
     const nextRecycleInfo = getNextScheduledArrival(
       point.recycleDay,
       candidate.scheduledTime,
       true
     );
+    const nextStopHint =
+      areaNext && areaNext.stopName !== stopName
+        ? `（${areaNext.stopName}）`
+        : "";
     return {
       found: true,
       routeId,
@@ -929,9 +1107,11 @@ export async function calculateEta(
         `🚫 今日無收運服務（優於官方：直接給下次時間）\n` +
         `📍 ${stopName}\n` +
         `🕐 表定：${formattedTime}\n` +
-        (nextGarbageInfo ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}\n` : "") +
+        (nextGarbageInfo
+          ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}${nextStopHint}\n`
+          : "") +
         (nextRecycleInfo ? `♻️ 下次回收車：${nextRecycleInfo.dateStr}\n` : "") +
-        `\n💡 傳「班表」看整週；有班日會在車距約 5 分鐘時主動推播。`,
+        `\n💡 傳「班表」看附近多個時段；有班日會在車距約 5 分鐘時主動推播。`,
     };
   }
 
@@ -1004,12 +1184,38 @@ export async function calculateEta(
           candidate.minutesUntilScheduled
         ));
 
-  const nextGarbageInfo = getNextScheduledArrival(
+  const nextGarbageInfoSingle = getNextScheduledArrival(
     point.trashDay,
     candidate.scheduledTime,
     isGarbagePassed,
     [...DEFAULT_GARBAGE_DAYS]
   );
+  // Area-wide: don't miss afternoon service on another nearby pin/route.
+  const areaNextGarbage = pickEarliestNextArrival(
+    candidates.slice(0, 15).map((c) => ({
+      id: `${c.point.routeId}:${c.point.seq}`,
+      name: c.point.pointName || c.point.address || "清運點",
+      daysString: c.point.trashDay,
+      scheduledTime: c.scheduledTime,
+      hasPassedToday: isSchedulePastGrace(
+        c.hasTodayGarbage,
+        c.minutesUntilScheduled
+      ),
+      defaultDays: [...DEFAULT_GARBAGE_DAYS],
+    }))
+  );
+  const nextGarbageInfo =
+    areaNextGarbage &&
+    (!nextGarbageInfoSingle ||
+      areaNextGarbage.dateStr !== nextGarbageInfoSingle.dateStr)
+      ? { dateStr: areaNextGarbage.dateStr, isToday: areaNextGarbage.isToday }
+      : nextGarbageInfoSingle;
+  const nextGarbageStopHint =
+    areaNextGarbage &&
+    areaNextGarbage.stopName &&
+    areaNextGarbage.stopName !== stopName
+      ? `（${areaNextGarbage.stopName}）`
+      : "";
   const nextRecycleInfo = getNextScheduledArrival(
     point.recycleDay,
     candidate.scheduledTime,
@@ -1023,7 +1229,7 @@ export async function calculateEta(
     (!nextRecycleInfo || !nextRecycleInfo.isToday)
   ) {
     const nextGarbageText = nextGarbageInfo
-      ? `\n🚛 下次垃圾車：${nextGarbageInfo.dateStr}`
+      ? `\n🚛 下次垃圾車：${nextGarbageInfo.dateStr}${nextGarbageStopHint}`
       : "";
     const nextRecycleText = nextRecycleInfo
       ? `\n♻️ 下次回收車：${nextRecycleInfo.dateStr}`
