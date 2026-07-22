@@ -320,9 +320,9 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               {
                 type: "text" as const,
                 text:
-                  `🛣️ 這台車走「${eta.routeName}」\n` +
-                  `很多地方是「沿路收」，地圖上不一定有清運點旗子。\n` +
-                  `打開地圖看藍線＝車會經過的路，往線附近等就好。`,
+                  `🛣️ 地圖會畫出「${eta.routeName}」完整路線（藍線）\n` +
+                  `橘色「在這等」＝離你家最近的路點＋預估時間。\n` +
+                  `沿路收不一定有旗子，往藍線靠近等就好。`,
                 color: "#1e3a8a" as const,
                 size: "xs" as const,
                 wrap: true

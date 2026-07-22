@@ -128,6 +128,19 @@
       color: #9a3412;
       font-weight: 700;
     }
+    .wait-icon {
+      background: #ffedd5;
+      border: 3px solid #ea580c;
+      border-radius: 16px;
+      text-align: center;
+      line-height: 28px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #9a3412;
+      box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);
+      padding: 0 8px;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -145,7 +158,7 @@
     </div>
     <div class="info-row" id="routeTipRow" style="display:none; color:#1e40af; font-size:13px; line-height:1.45;">
       <span>🛣️</span>
-      <span id="routeTip">藍線＝車會經過的路，往線附近等即可</span>
+      <span id="routeTip">藍線＝完整路線；橘點＝離你家最近、建議等候處</span>
     </div>
   </div>
 
@@ -304,7 +317,7 @@
       map.setView([24.8138, 120.9675], 13); // Default Hsinchu
     }
 
-    // Load route corridor (async) — calm blue line for "along-route" collection
+    // Load FULL route + closest wait point (async)
     async function loadRoutePath() {
       if (!routeId) return;
       try {
@@ -327,17 +340,61 @@
 
         L.polyline(pts, {
           color: '#2563eb',
-          weight: 6,
-          opacity: 0.85,
+          weight: 5,
+          opacity: 0.8,
           lineJoin: 'round',
           lineCap: 'round'
         }).addTo(map).bindPopup(
-          (data.routeName || routeName || '清運路線') +
-          '\n往這條藍線附近等即可（沿路收）'
+          (data.routeName || routeName || '清運路線') + '（完整路線）'
         );
 
         pts.forEach(function (p) { bounds.extend(p); });
-        if (bounds.isValid()) {
+
+        var closest = data.closest;
+        if (closest && !isNaN(closest.lat) && !isNaN(closest.lng)) {
+          var waitLabel = closest.etaMinutes != null
+            ? ('在這等 · 約' + closest.etaMinutes + '分')
+            : '在這等';
+          var waitIcon = L.divIcon({
+            className: 'wait-icon',
+            html: waitLabel,
+            iconSize: [120, 32],
+            iconAnchor: [60, 16]
+          });
+          L.marker([closest.lat, closest.lng], { icon: waitIcon, zIndexOffset: 800 })
+            .addTo(map)
+            .bindPopup(
+              '<b>建議等候處</b>（離你家最近的路線點）<br/>' +
+              (closest.name || '') + '<br/>' +
+              '距離約 ' + closest.distanceMeters + ' 公尺<br/>' +
+              (closest.statusLabel || '')
+            );
+          bounds.extend([closest.lat, closest.lng]);
+
+          // Focus near home + wait point + truck (full line still drawn)
+          var focus = L.latLngBounds();
+          if (!isNaN(uLat) && !isNaN(uLng)) focus.extend([uLat, uLng]);
+          focus.extend([closest.lat, closest.lng]);
+          if (!isNaN(tLat) && !isNaN(tLng)) focus.extend([tLat, tLng]);
+          if (focus.isValid()) {
+            map.fitBounds(focus, { padding: [60, 60], maxZoom: 16 });
+          } else if (bounds.isValid()) {
+            map.fitBounds(bounds, { padding: [40, 40] });
+          }
+
+          document.getElementById('stopName').textContent =
+            '建議等：' + (closest.name || '路線最近點') +
+            '（' + closest.distanceMeters + 'm）';
+          var badge = document.getElementById('etaBadge');
+          if (closest.etaMinutes != null) {
+            badge.textContent = closest.etaMinutes <= 1 ? '即將到等候處' : ('約 ' + closest.etaMinutes + ' 分鐘');
+            if (closest.etaMinutes <= 1) badge.classList.add('urgent');
+          } else {
+            badge.textContent = closest.scheduledTime
+              ? ('表定 ' + closest.scheduledTime)
+              : '沿線等候';
+          }
+        } else if (bounds.isValid()) {
           map.fitBounds(bounds, { padding: [48, 48] });
         }
 
@@ -346,7 +403,7 @@
         if (tipRow && tipEl) {
           tipRow.style.display = 'flex';
           tipEl.textContent = data.tip ||
-            ('藍線＝' + (data.routeName || routeName || '垃圾車') + '會經過的路，往線附近等即可（不一定要有旗子）');
+            '藍線＝完整路線；橘標＝離你家最近、建議在這等';
         }
       } catch (e) {
         console.warn('route path load failed', e);
@@ -354,16 +411,15 @@
     }
     loadRoutePath();
 
-    // 5. Update UI Card
+    // 5. Update UI Card (route loader may refine ETA for wait point)
     document.getElementById('statusCard').style.display = 'flex';
     let truckTitle = carNo;
     if (rCarNo) truckTitle += ` | ♻️ ${rCarNo}`;
+    document.getElementById('truckNo').textContent = truckTitle;
     if (routeName) {
-      document.getElementById('truckNo').textContent = truckTitle;
       document.getElementById('stopName').textContent =
-        decodeURIComponent(stopName) + '｜路線 ' + decodeURIComponent(routeName);
+        decodeURIComponent(stopName) + '｜' + decodeURIComponent(routeName);
     } else {
-      document.getElementById('truckNo').textContent = truckTitle;
       document.getElementById('stopName').textContent = decodeURIComponent(stopName);
     }
     

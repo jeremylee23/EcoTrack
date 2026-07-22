@@ -844,13 +844,30 @@ export async function calculateEta(
   }
 
   const point = candidate.point;
-  const routeId = point.routeId;
-  const stopLat = parseFloat(point.lat);
-  const stopLng = parseFloat(point.lon);
-  const targetSequence = parseInt(point.seq, 10) || 0;
-  const formattedTime = candidate.scheduledTime ?? "未知";
-  const stopName = point.pointName || point.address;
+  let routeId = point.routeId;
+  let stopLat = parseFloat(point.lat);
+  let stopLng = parseFloat(point.lon);
+  let targetSequence = parseInt(point.seq, 10) || 0;
+  let formattedTime = candidate.scheduledTime ?? "未知";
+  let stopName = point.pointName || point.address;
   const weekday = getTaiwanWeekday();
+
+  // Prefer the point ON this truck's full route that is closest to home
+  // (along-route collection often isn't the official "nearest clean point").
+  try {
+    const onRoute = await findClosestDbStopOnRoute(routeId, userLat, userLng);
+    if (onRoute) {
+      stopLat = onRoute.lat;
+      stopLng = onRoute.lng;
+      targetSequence = onRoute.seq || targetSequence;
+      stopName = onRoute.name || stopName;
+      if (onRoute.scheduledTime) formattedTime = onRoute.scheduledTime;
+      point.pointName = stopName;
+      point.address = onRoute.address || point.address;
+    }
+  } catch (err) {
+    console.error("[TruckService] closest-on-route override failed:", err);
+  }
 
   const nearbyUncleared = candidates
     .filter((c) => c.hasTodayGarbage || c.hasTodayRecycling)
@@ -1482,11 +1499,81 @@ export async function fetchAllStops(): Promise<HccgCleanPointData | null> {
   };
 }
 
-export type RoutePathPoint = { lat: number; lng: number; seq?: number };
+export type RoutePathPoint = {
+  lat: number;
+  lng: number;
+  seq?: number;
+  name?: string;
+  scheduledTime?: string | null;
+};
+
+/** Closest stop on a route to the user (from DB). */
+async function findClosestDbStopOnRoute(
+  routeId: string,
+  userLat: number,
+  userLng: number
+): Promise<{
+  lat: number;
+  lng: number;
+  seq: number;
+  name: string;
+  address?: string;
+  scheduledTime: string | null;
+  distanceMeters: number;
+} | null> {
+  const db = getSupabaseClient();
+  const { data: stops } = await db
+    .from("route_stops")
+    .select("lat, lng, sequence_order, point_name, address, scheduled_time")
+    .eq("route_id", routeId)
+    .order("sequence_order", { ascending: true })
+    .limit(400);
+
+  if (!stops?.length) return null;
+
+  let best: (typeof stops)[0] | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const s of stops) {
+    if (typeof s.lat !== "number" || typeof s.lng !== "number") continue;
+    if (!isValidCoordinate(s.lat, s.lng)) continue;
+    const d = haversineDistance(userLat, userLng, s.lat, s.lng) * 1000;
+    if (d < bestDist) {
+      bestDist = d;
+      best = s;
+    }
+  }
+  if (!best) return null;
+
+  const scheduled =
+    typeof best.scheduled_time === "string"
+      ? best.scheduled_time.slice(0, 5)
+      : null;
+
+  return {
+    lat: best.lat,
+    lng: best.lng,
+    seq: best.sequence_order,
+    name: best.point_name || best.address || `路線序 ${best.sequence_order}`,
+    address: best.address ?? undefined,
+    scheduledTime: scheduled,
+    distanceMeters: Math.round(bestDist),
+  };
+}
+
+export interface ClosestWaitPoint {
+  lat: number;
+  lng: number;
+  seq: number;
+  name: string;
+  address?: string;
+  scheduledTime?: string | null;
+  distanceMeters: number;
+  etaMinutes?: number;
+  statusLabel: string;
+}
 
 /**
- * Path for map overlay: prefer DB stop sequence; else nearby corridor on same route.
- * Kept short so the map stays calm for seniors (not a spaghetti of city-wide lines).
+ * Full collection route for map + the point on that route closest to home (wait here).
  */
 export async function getRoutePathForMap(
   routeId: string,
@@ -1496,29 +1583,22 @@ export async function getRoutePathForMap(
   routeName?: string;
   points: RoutePathPoint[];
   mode: "full" | "corridor" | "empty";
+  closest?: ClosestWaitPoint;
 }> {
   const redis = getRedis();
-  const cacheKey = `route_path_v1:${routeId}:${
-    options.nearLat !== undefined
-      ? `${options.nearLat.toFixed(3)},${options.nearLng?.toFixed(3)}`
-      : "full"
-  }`;
+  const pointsCacheKey = `route_path_full_v2:${routeId}`;
+
+  let routeName = options.routeName;
+  let points: RoutePathPoint[] = [];
 
   try {
-    const cached = await redis.get<{
-      routeId: string;
-      routeName?: string;
-      points: RoutePathPoint[];
-      mode: "full" | "corridor" | "empty";
-    }>(cacheKey);
-    if (cached?.points?.length) return cached;
+    const cached = await redis.get<RoutePathPoint[]>(pointsCacheKey);
+    if (cached && cached.length >= 2) points = cached;
   } catch {
     /* ignore */
   }
 
   const db = getSupabaseClient();
-  let routeName = options.routeName;
-
   if (!routeName) {
     const { data: routeRow } = await db
       .from("truck_routes")
@@ -1528,94 +1608,230 @@ export async function getRoutePathForMap(
     routeName = routeRow?.name ?? undefined;
   }
 
-  const { data: stops } = await db
-    .from("route_stops")
-    .select("lat, lng, sequence_order")
-    .eq("route_id", routeId)
-    .order("sequence_order", { ascending: true })
-    .limit(120);
+  if (points.length < 2) {
+    const { data: stops } = await db
+      .from("route_stops")
+      .select("lat, lng, sequence_order, point_name, address, scheduled_time")
+      .eq("route_id", routeId)
+      .order("sequence_order", { ascending: true })
+      .limit(400);
 
-  let points: RoutePathPoint[] = [];
-  let mode: "full" | "corridor" | "empty" = "empty";
-
-  if (stops && stops.length >= 2) {
-    points = stops
-      .filter(
-        (s) =>
-          typeof s.lat === "number" &&
-          typeof s.lng === "number" &&
-          isValidCoordinate(s.lat, s.lng)
-      )
-      .map((s) => ({
-        lat: s.lat,
-        lng: s.lng,
-        seq: s.sequence_order,
-      }));
-    mode = "full";
-
-    // If user location known, clip to a calm local corridor (±8 stops around nearest)
-    if (
-      options.nearLat !== undefined &&
-      options.nearLng !== undefined &&
-      points.length > 16
-    ) {
-      let nearestIdx = 0;
-      let best = Number.POSITIVE_INFINITY;
-      points.forEach((p, i) => {
-        const d = haversineDistance(
-          options.nearLat!,
-          options.nearLng!,
-          p.lat,
-          p.lng
-        );
-        if (d < best) {
-          best = d;
-          nearestIdx = i;
-        }
-      });
-      const from = Math.max(0, nearestIdx - 8);
-      const to = Math.min(points.length, nearestIdx + 9);
-      points = points.slice(from, to);
-      mode = "corridor";
+    if (stops && stops.length >= 2) {
+      points = stops
+        .filter(
+          (s) =>
+            typeof s.lat === "number" &&
+            typeof s.lng === "number" &&
+            isValidCoordinate(s.lat, s.lng)
+        )
+        .map((s) => ({
+          lat: s.lat,
+          lng: s.lng,
+          seq: s.sequence_order,
+          name: s.point_name || s.address || undefined,
+          scheduledTime:
+            typeof s.scheduled_time === "string"
+              ? s.scheduled_time.slice(0, 5)
+              : null,
+        }));
     }
-  } else if (
+  }
+
+  if (points.length < 2) {
+    points = await fetchFullRoutePointsFromHccg(routeId);
+    if (!routeName && points[0]?.name) {
+      /* name on point is stop name, not route */
+    }
+  }
+
+  if (points.length < 2) {
+    // Last resort: local corridor from nearby API (incomplete but better than nothing)
+    if (options.nearLat !== undefined && options.nearLng !== undefined) {
+      try {
+        const nearby = await fetchNearbyPointsCached(
+          options.nearLat,
+          options.nearLng,
+          500,
+          "all_day"
+        );
+        points = nearby
+          .filter((p) => p.routeId === routeId)
+          .map((p) => ({
+            lat: parseFloat(p.lat),
+            lng: parseFloat(p.lon),
+            seq: parseInt(p.seq, 10) || 0,
+            name: p.pointName || p.address,
+            scheduledTime: parseScheduledTime(p.time),
+          }))
+          .filter((p) => isValidCoordinate(p.lat, p.lng))
+          .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+        if (!routeName && nearby.find((p) => p.routeId === routeId)?.routeName) {
+          routeName = nearby.find((p) => p.routeId === routeId)!.routeName;
+        }
+      } catch (err) {
+        console.error("[TruckService] route fallback failed:", err);
+      }
+    }
+  }
+
+  if (points.length >= 2) {
+    redis
+      .set(pointsCacheKey, points, { ex: 60 * 60 * 24 })
+      .catch(() => undefined);
+  }
+
+  let mode: "full" | "corridor" | "empty" =
+    points.length >= 2 ? "full" : "empty";
+
+  let closest: ClosestWaitPoint | undefined;
+  if (
+    points.length > 0 &&
     options.nearLat !== undefined &&
     options.nearLng !== undefined
   ) {
-    // Fallback: HCCG nearby points on same route, ordered by seq
-    try {
-      const nearby = await fetchNearbyPointsCached(
-        options.nearLat,
-        options.nearLng,
-        500,
-        "all_day"
+    closest = await buildClosestWaitPoint(
+      routeId,
+      points,
+      options.nearLat,
+      options.nearLng
+    );
+  }
+
+  // Downsample for Leaflet; always keep closest point
+  let drawPoints = points;
+  if (points.length > 80) {
+    const step = Math.ceil(points.length / 80);
+    const keep = new Set<number>();
+    points.forEach((_, i) => {
+      if (i % step === 0 || i === points.length - 1) keep.add(i);
+    });
+    if (closest) {
+      const idx = points.findIndex(
+        (p) =>
+          Math.abs(p.lat - closest!.lat) < 1e-6 &&
+          Math.abs(p.lng - closest!.lng) < 1e-6
       );
-      points = nearby
-        .filter((p) => p.routeId === routeId)
-        .map((p) => ({
-          lat: parseFloat(p.lat),
-          lng: parseFloat(p.lon),
-          seq: parseInt(p.seq, 10) || 0,
-        }))
-        .filter((p) => isValidCoordinate(p.lat, p.lng))
-        .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-      if (points.length >= 2) mode = "corridor";
-      if (!routeName && nearby[0]?.routeName) routeName = nearby[0].routeName;
-    } catch (err) {
-      console.error("[TruckService] route corridor fallback failed:", err);
+      if (idx >= 0) keep.add(idx);
+    }
+    drawPoints = points.filter((_, i) => keep.has(i));
+  }
+
+  return {
+    routeId,
+    routeName,
+    points: drawPoints,
+    mode,
+    closest,
+  };
+}
+
+async function buildClosestWaitPoint(
+  routeId: string,
+  points: RoutePathPoint[],
+  userLat: number,
+  userLng: number
+): Promise<ClosestWaitPoint> {
+  let best = points[0];
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const p of points) {
+    const d = haversineDistance(userLat, userLng, p.lat, p.lng) * 1000;
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
     }
   }
 
-  // Downsample long polylines for Leaflet smoothness
-  if (points.length > 40) {
-    const step = Math.ceil(points.length / 40);
-    points = points.filter((_, i) => i % step === 0 || i === points.length - 1);
+  const seq = best.seq ?? 0;
+  const name = best.name || `路線序 ${seq || "?"}`;
+  let etaMinutes: number | undefined;
+  let statusLabel = best.scheduledTime
+    ? `表定 ${best.scheduledTime}`
+    : "沿路線等候";
+
+  try {
+    const truckData = await loadLiveTrucksForRoute(routeId);
+    const truck = truckData.garbage ?? truckData.recycling;
+    if (truck && seq > 0) {
+      if (isSequencePastStop(truck.heading_to_stop_sequence, seq)) {
+        statusLabel = "此點可能已過，請看車頭方向沿線等";
+      } else {
+        etaMinutes = estimateEtaFromTruck(truck, best.lat, best.lng, seq);
+        statusLabel = `預估約 ${etaMinutes} 分鐘抵達此處`;
+      }
+    } else if (best.scheduledTime) {
+      const mins = getMinutesUntilScheduled(best.scheduledTime);
+      if (mins !== null && mins >= -SCHEDULE_LATE_GRACE_MINUTES) {
+        if (mins >= 0) {
+          statusLabel = `表定約 ${mins} 分鐘後（${best.scheduledTime}）`;
+        } else {
+          statusLabel = `表定 ${best.scheduledTime}（可能延誤中）`;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[TruckService] closest wait ETA failed:", err);
   }
 
-  const result = { routeId, routeName, points, mode };
-  if (points.length >= 2) {
-    redis.set(cacheKey, result, { ex: 60 * 60 * 12 }).catch(() => undefined);
+  return {
+    lat: best.lat,
+    lng: best.lng,
+    seq,
+    name,
+    scheduledTime: best.scheduledTime ?? null,
+    distanceMeters: Math.round(bestDist),
+    etaMinutes,
+    statusLabel,
+  };
+}
+
+/** Load all HCCG clean points for one route (cached). */
+async function fetchFullRoutePointsFromHccg(
+  routeId: string
+): Promise<RoutePathPoint[]> {
+  const redis = getRedis();
+  const key = `hccg_route_points_v1:${routeId}`;
+  try {
+    const cached = await redis.get<RoutePathPoint[]>(key);
+    if (cached && cached.length >= 2) return cached;
+  } catch {
+    /* ignore */
   }
-  return result;
+
+  try {
+    const params = new URLSearchParams({ address: "" });
+    const response = await fetch(
+      `${config.hccg.baseUrl}/getPointData?${params.toString()}`,
+      {
+        headers: {
+          Referer: config.hccg.referer,
+          "User-Agent": "EcoTrack-Bot/1.0",
+        },
+        signal: AbortSignal.timeout(12_000),
+      }
+    );
+    if (!response.ok) return [];
+    const json = (await response.json()) as HccgApiResponse<HccgCleanPointData>;
+    if (json.statusCode !== 1 || !json.data?.cleanPoint) return [];
+
+    const points = json.data.cleanPoint
+      .filter((p) => p.routeId === routeId)
+      .map((p) => ({
+        lat: parseFloat(p.lat),
+        lng: parseFloat(p.lon),
+        seq: parseInt(p.seq, 10) || 0,
+        name: p.pointName || p.address,
+        scheduledTime: parseScheduledTime(p.time),
+      }))
+      .filter((p) => isValidCoordinate(p.lat, p.lng))
+      .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+
+    if (points.length >= 2) {
+      redis.set(key, points, { ex: 60 * 60 * 24 }).catch(() => undefined);
+    }
+    return points;
+  } catch (err) {
+    console.error("[TruckService] fetchFullRoutePointsFromHccg failed:", err);
+    return [];
+  }
 }
 
