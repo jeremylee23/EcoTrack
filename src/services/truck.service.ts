@@ -673,7 +673,7 @@ export async function getNearbyStopsGuide(
     nearest && soonestUseful && nearest.id !== soonestUseful.id
       ? `📌 最近：${nearest.name}（${nearest.distanceMeters}m）｜最快：${soonestUseful.name}（${soonestUseful.distanceMeters}m）`
       : null,
-    `💡 點「垃圾車」可追即時位置；傳「半徑 200」可加大範圍。`,
+    `💡 很多路段是「沿路收」，不一定有官方清運點旗子；點「垃圾車」看地圖藍線（車會經過的路）。`,
   ].filter((line): line is string => line !== null);
 
   return {
@@ -1481,3 +1481,141 @@ export async function fetchAllStops(): Promise<HccgCleanPointData | null> {
     cleanPoint: json.data.cleanPoint,
   };
 }
+
+export type RoutePathPoint = { lat: number; lng: number; seq?: number };
+
+/**
+ * Path for map overlay: prefer DB stop sequence; else nearby corridor on same route.
+ * Kept short so the map stays calm for seniors (not a spaghetti of city-wide lines).
+ */
+export async function getRoutePathForMap(
+  routeId: string,
+  options: { nearLat?: number; nearLng?: number; routeName?: string } = {}
+): Promise<{
+  routeId: string;
+  routeName?: string;
+  points: RoutePathPoint[];
+  mode: "full" | "corridor" | "empty";
+}> {
+  const redis = getRedis();
+  const cacheKey = `route_path_v1:${routeId}:${
+    options.nearLat !== undefined
+      ? `${options.nearLat.toFixed(3)},${options.nearLng?.toFixed(3)}`
+      : "full"
+  }`;
+
+  try {
+    const cached = await redis.get<{
+      routeId: string;
+      routeName?: string;
+      points: RoutePathPoint[];
+      mode: "full" | "corridor" | "empty";
+    }>(cacheKey);
+    if (cached?.points?.length) return cached;
+  } catch {
+    /* ignore */
+  }
+
+  const db = getSupabaseClient();
+  let routeName = options.routeName;
+
+  if (!routeName) {
+    const { data: routeRow } = await db
+      .from("truck_routes")
+      .select("name")
+      .eq("id", routeId)
+      .maybeSingle();
+    routeName = routeRow?.name ?? undefined;
+  }
+
+  const { data: stops } = await db
+    .from("route_stops")
+    .select("lat, lng, sequence_order")
+    .eq("route_id", routeId)
+    .order("sequence_order", { ascending: true })
+    .limit(120);
+
+  let points: RoutePathPoint[] = [];
+  let mode: "full" | "corridor" | "empty" = "empty";
+
+  if (stops && stops.length >= 2) {
+    points = stops
+      .filter(
+        (s) =>
+          typeof s.lat === "number" &&
+          typeof s.lng === "number" &&
+          isValidCoordinate(s.lat, s.lng)
+      )
+      .map((s) => ({
+        lat: s.lat,
+        lng: s.lng,
+        seq: s.sequence_order,
+      }));
+    mode = "full";
+
+    // If user location known, clip to a calm local corridor (±8 stops around nearest)
+    if (
+      options.nearLat !== undefined &&
+      options.nearLng !== undefined &&
+      points.length > 16
+    ) {
+      let nearestIdx = 0;
+      let best = Number.POSITIVE_INFINITY;
+      points.forEach((p, i) => {
+        const d = haversineDistance(
+          options.nearLat!,
+          options.nearLng!,
+          p.lat,
+          p.lng
+        );
+        if (d < best) {
+          best = d;
+          nearestIdx = i;
+        }
+      });
+      const from = Math.max(0, nearestIdx - 8);
+      const to = Math.min(points.length, nearestIdx + 9);
+      points = points.slice(from, to);
+      mode = "corridor";
+    }
+  } else if (
+    options.nearLat !== undefined &&
+    options.nearLng !== undefined
+  ) {
+    // Fallback: HCCG nearby points on same route, ordered by seq
+    try {
+      const nearby = await fetchNearbyPointsCached(
+        options.nearLat,
+        options.nearLng,
+        500,
+        "all_day"
+      );
+      points = nearby
+        .filter((p) => p.routeId === routeId)
+        .map((p) => ({
+          lat: parseFloat(p.lat),
+          lng: parseFloat(p.lon),
+          seq: parseInt(p.seq, 10) || 0,
+        }))
+        .filter((p) => isValidCoordinate(p.lat, p.lng))
+        .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+      if (points.length >= 2) mode = "corridor";
+      if (!routeName && nearby[0]?.routeName) routeName = nearby[0].routeName;
+    } catch (err) {
+      console.error("[TruckService] route corridor fallback failed:", err);
+    }
+  }
+
+  // Downsample long polylines for Leaflet smoothness
+  if (points.length > 40) {
+    const step = Math.ceil(points.length / 40);
+    points = points.filter((_, i) => i % step === 0 || i === points.length - 1);
+  }
+
+  const result = { routeId, routeName, points, mode };
+  if (points.length >= 2) {
+    redis.set(cacheKey, result, { ex: 60 * 60 * 12 }).catch(() => undefined);
+  }
+  return result;
+}
+

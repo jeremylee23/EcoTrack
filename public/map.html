@@ -143,6 +143,10 @@
       <span>📍</span>
       <span id="stopName">站點名稱</span>
     </div>
+    <div class="info-row" id="routeTipRow" style="display:none; color:#1e40af; font-size:13px; line-height:1.45;">
+      <span>🛣️</span>
+      <span id="routeTip">藍線＝車會經過的路，往線附近等即可</span>
+    </div>
   </div>
 
   <!-- Leaflet JS -->
@@ -177,6 +181,10 @@
         return { lat, lng };
       })
       .filter((p) => !isNaN(p.lat) && !isNaN(p.lng));
+    const routeId = params.get('routeId') || '';
+    const routeName = params.get('routeName') || '';
+    const pathLat = parseFloat(params.get('pathLat'));
+    const pathLng = parseFloat(params.get('pathLng'));
 
     // 2. Setup map
     const map = L.map('map', {
@@ -242,10 +250,12 @@
     }
 
     nearPoints.forEach((p, idx) => {
-      // Skip duplicate of primary stop
+      // Skip duplicate of primary stop — keep these quiet (small dots) so route line stays clear
       if (!isNaN(sLat) && !isNaN(sLng) && Math.abs(p.lat - sLat) < 1e-5 && Math.abs(p.lng - sLng) < 1e-5) {
         return;
       }
+      // When route line is shown, skip numbered flags to avoid clutter for seniors
+      if (routeId) return;
       const nearIcon = L.divIcon({
         className: 'near-icon',
         html: String(idx + 1),
@@ -262,8 +272,8 @@
       L.marker([tLat, tLng], {icon: truckIcon}).addTo(map).bindPopup('垃圾車 (' + carNo + ')');
       bounds.extend([tLat, tLng]);
       
-      // Draw dotted line between truck and stop
-      if (!isNaN(sLat) && !isNaN(sLng)) {
+      // Soft guide line truck → reference stop (route polyline is the main story)
+      if (!isNaN(sLat) && !isNaN(sLng) && !routeId) {
         L.polyline([[tLat, tLng], [sLat, sLng]], {
           color: '#3b82f6',
           weight: 4,
@@ -277,8 +287,7 @@
       L.marker([rLat, rLng], {icon: recycleIcon}).addTo(map).bindPopup('回收車 (' + rCarNo + ')');
       bounds.extend([rLat, rLng]);
       
-      // Draw dotted line for recycling truck
-      if (!isNaN(sLat) && !isNaN(sLng)) {
+      if (!isNaN(sLat) && !isNaN(sLng) && !routeId) {
         L.polyline([[rLat, rLng], [sLat, sLng]], {
           color: '#10b981',
           weight: 4,
@@ -295,12 +304,68 @@
       map.setView([24.8138, 120.9675], 13); // Default Hsinchu
     }
 
+    // Load route corridor (async) — calm blue line for "along-route" collection
+    async function loadRoutePath() {
+      if (!routeId) return;
+      try {
+        const qs = new URLSearchParams({ routeId });
+        if (routeName) qs.set('routeName', routeName);
+        if (!isNaN(pathLat) && !isNaN(pathLng)) {
+          qs.set('lat', String(pathLat));
+          qs.set('lng', String(pathLng));
+        } else if (!isNaN(uLat) && !isNaN(uLng)) {
+          qs.set('lat', String(uLat));
+          qs.set('lng', String(uLng));
+        }
+        const res = await fetch('/api/route-path?' + qs.toString());
+        if (!res.ok) return;
+        const data = await res.json();
+        const pts = (data.points || [])
+          .map(function (p) { return [p.lat, p.lng]; })
+          .filter(function (p) { return !isNaN(p[0]) && !isNaN(p[1]); });
+        if (pts.length < 2) return;
+
+        L.polyline(pts, {
+          color: '#2563eb',
+          weight: 6,
+          opacity: 0.85,
+          lineJoin: 'round',
+          lineCap: 'round'
+        }).addTo(map).bindPopup(
+          (data.routeName || routeName || '清運路線') +
+          '\n往這條藍線附近等即可（沿路收）'
+        );
+
+        pts.forEach(function (p) { bounds.extend(p); });
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, { padding: [48, 48] });
+        }
+
+        var tipRow = document.getElementById('routeTipRow');
+        var tipEl = document.getElementById('routeTip');
+        if (tipRow && tipEl) {
+          tipRow.style.display = 'flex';
+          tipEl.textContent = data.tip ||
+            ('藍線＝' + (data.routeName || routeName || '垃圾車') + '會經過的路，往線附近等即可（不一定要有旗子）');
+        }
+      } catch (e) {
+        console.warn('route path load failed', e);
+      }
+    }
+    loadRoutePath();
+
     // 5. Update UI Card
     document.getElementById('statusCard').style.display = 'flex';
     let truckTitle = carNo;
     if (rCarNo) truckTitle += ` | ♻️ ${rCarNo}`;
-    document.getElementById('truckNo').textContent = truckTitle;
-    document.getElementById('stopName').textContent = decodeURIComponent(stopName);
+    if (routeName) {
+      document.getElementById('truckNo').textContent = truckTitle;
+      document.getElementById('stopName').textContent =
+        decodeURIComponent(stopName) + '｜路線 ' + decodeURIComponent(routeName);
+    } else {
+      document.getElementById('truckNo').textContent = truckTitle;
+      document.getElementById('stopName').textContent = decodeURIComponent(stopName);
+    }
     
     const badge = document.getElementById('etaBadge');
     if (noService) {

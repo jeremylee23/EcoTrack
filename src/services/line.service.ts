@@ -156,6 +156,13 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     params.append("nearN", String(Math.min(8, eta.nearbyUncleared.length)));
   }
   if (eta.radiusMeters) params.append("radius", String(eta.radiusMeters));
+  if (eta.routeId) params.append("routeId", eta.routeId);
+  if (eta.routeName) params.append("routeName", eta.routeName);
+  // Prefer corridor around user; fall back to stop
+  const pathLat = eta.userLat ?? eta.stopLat;
+  const pathLng = eta.userLng ?? eta.stopLng;
+  if (pathLat !== undefined) params.append("pathLat", String(pathLat));
+  if (pathLng !== undefined) params.append("pathLng", String(pathLng));
   const mapUrl = `${baseUrl}?${params.toString()}`;
 
   const altText = eta.noServiceToday
@@ -297,6 +304,26 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 type: "text" as const,
                 text: "🔄 原路線暫無訊號，已改追蹤附近 100 公尺內有車的替代路線。",
                 color: "#1d4ed8" as const,
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...(eta.routeName && !eta.noServiceToday ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#eff6ff" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text:
+                  `🛣️ 這台車走「${eta.routeName}」\n` +
+                  `很多地方是「沿路收」，地圖上不一定有清運點旗子。\n` +
+                  `打開地圖看藍線＝車會經過的路，往線附近等就好。`,
+                color: "#1e3a8a" as const,
                 size: "xs" as const,
                 wrap: true
               }
@@ -486,7 +513,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   type: "uri",
                   label: eta.noServiceToday
                     ? "🗺️ 開啟地圖（看站點）"
-                    : "🗺️ 開啟即時追蹤地圖",
+                    : "🗺️ 看路線地圖（往藍線等）",
                   uri: mapUrl
                 }
               }
