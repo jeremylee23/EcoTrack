@@ -112,16 +112,16 @@ async function createRichMenuImage(): Promise<string> {
       const y = cellY(c.row);
       const w = COL_W[c.col];
       const h = ROW_H[c.row];
-      const pad = 18;
+      const pad = 14;
       const cx = x + w / 2;
       const cy = y + h / 2;
       return `
         <rect x="${x + pad}" y="${y + pad}" width="${w - pad * 2}" height="${h - pad * 2}"
               rx="28" fill="${c.bg}" />
-        <text x="${cx}" y="${cy - 10}" font-family="Helvetica Neue, Arial, sans-serif"
-              font-size="64" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
-        <text x="${cx}" y="${cy + 55}" font-family="Helvetica Neue, Arial, sans-serif"
-              font-size="36" font-weight="500" fill="${c.subFg}" text-anchor="middle">${c.subtitle}</text>
+        <text x="${cx}" y="${cy - 8}" font-family="Helvetica Neue, Arial, sans-serif"
+              font-size="88" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
+        <text x="${cx}" y="${cy + 72}" font-family="Helvetica Neue, Arial, sans-serif"
+              font-size="44" font-weight="600" fill="${c.subFg}" text-anchor="middle">${c.subtitle}</text>
       `;
     })
     .join("\n");
