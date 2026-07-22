@@ -1,11 +1,5 @@
 /**
  * api/webhook.ts → Vercel Serverless Function: POST /api/webhook
- *
- * LINE Webhook endpoint (SDK v8):
- *  1. Validates x-line-signature (HMAC-SHA256 + timingSafeEqual)
- *  2. Handles location messages  → upsert user GPS, reply confirmation
- *  3. Handles text messages      → ETA query or help
- *  4. Handles follow events      → send welcome message
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
@@ -13,7 +7,14 @@ import crypto from "crypto";
 import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
 import { upsertUserLocation, getUserByLineId } from "../src/services/user.service.js";
-import { calculateEta, getUserRouteId, setUserRouteId, resolveNearestRoute } from "../src/services/truck.service.js";
+import {
+  calculateEta,
+  getUserRouteId,
+  setUserRouteId,
+  resolveNearestRoute,
+  searchCleanPointsByKeyword,
+  getScheduleCardForLocation,
+} from "../src/services/truck.service.js";
 import {
   replyMessage,
   buildTextMessage,
@@ -22,20 +23,20 @@ import {
   buildWelcomeMessage,
 } from "../src/services/line.service.js";
 import { classifyIntent, generateRagResponse } from "../src/services/rag.service.js";
+import {
+  getUserPrefs,
+  setUserPrefs,
+  upsertFavorite,
+  clearActiveFavorite,
+  clampRadiusMeters,
+} from "../src/services/prefs.service.js";
 
-// ── Type aliases from LINE SDK v8 webhook namespace ──────────
-type Event            = webhook.Event;
-type MessageEvent     = webhook.MessageEvent;
-type FollowEvent      = webhook.FollowEvent;
+type Event = webhook.Event;
+type MessageEvent = webhook.MessageEvent;
+type FollowEvent = webhook.FollowEvent;
 type LocationMessageContent = webhook.LocationMessageContent;
-type TextMessageContent     = webhook.TextMessageContent;
+type TextMessageContent = webhook.TextMessageContent;
 
-// ── Signature validation ─────────────────────────────────────
-
-/**
- * Verifies x-line-signature using HMAC-SHA256 + timingSafeEqual.
- * Protects against spoofed webhook calls and timing attacks.
- */
 function validateLineSignature(
   rawBody: string,
   signature: string | string[] | undefined
@@ -48,13 +49,32 @@ function validateLineSignature(
     .digest("base64");
 
   const hmacBuffer = Buffer.from(hmac);
-  const sigBuffer  = Buffer.from(signature);
+  const sigBuffer = Buffer.from(signature);
 
   if (hmacBuffer.length !== sigBuffer.length) return false;
   return crypto.timingSafeEqual(hmacBuffer, sigBuffer);
 }
 
-// ── Event handlers ────────────────────────────────────────────
+async function getActiveCoords(
+  userId: string
+): Promise<{ lat: number; lng: number; label: string } | null> {
+  const prefs = await getUserPrefs(userId);
+  if (prefs.activeFavoriteId) {
+    const fav = prefs.favorites.find((f) => f.id === prefs.activeFavoriteId);
+    if (fav) return { lat: fav.lat, lng: fav.lng, label: fav.label };
+  }
+
+  const { createClient } = await import("@supabase/supabase-js");
+  const db = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
+    auth: { persistSession: false },
+  });
+  const { data: coords } = await db.rpc("get_user_coords", {
+    p_line_user_id: userId,
+  });
+  const coordData = coords as { lat: number; lng: number } | null;
+  if (!coordData?.lat) return null;
+  return { lat: coordData.lat, lng: coordData.lng, label: "住家" };
+}
 
 async function handleLocationMessage(
   userId: string,
@@ -64,29 +84,29 @@ async function handleLocationMessage(
   const { latitude, longitude, address } = msg;
   if (latitude == null || longitude == null) return;
 
-  // Update location in DB
   await upsertUserLocation(userId, latitude, longitude);
+  await clearActiveFavorite(userId);
 
-  // Fix 1: Detect if user switched to a different route after changing address
   let routeSwitchNotice = "";
   try {
+    const prefs = await getUserPrefs(userId);
     const [nearestRoute, prevRouteRaw] = await Promise.all([
-      resolveNearestRoute(latitude, longitude),
+      resolveNearestRoute(latitude, longitude, {
+        locateMode: prefs.locateMode,
+        radiusMeters: prefs.radiusMeters,
+      }),
       getUserRouteId(userId),
     ]);
 
     if (nearestRoute) {
       const prevRoute = prevRouteRaw ? JSON.parse(prevRouteRaw) : null;
-
       if (prevRoute && prevRoute.routeId !== nearestRoute.routeId) {
-        // User moved to a different route area
-        routeSwitchNotice = `\n\n🔄 路線已切換\n` +
+        routeSwitchNotice =
+          `\n\n🔄 路線已切換\n` +
           `原路線：${prevRoute.routeName}\n` +
           `新路線：${nearestRoute.routeName}\n` +
           `現在將追蹤新地址最近的垃圾車 🚛`;
       }
-
-      // Update cached route for this user (now with the real route name)
       await setUserRouteId(userId, nearestRoute.routeId, nearestRoute.routeName);
     }
   } catch (err) {
@@ -94,7 +114,7 @@ async function handleLocationMessage(
   }
 
   await replyMessage(replyToken, [
-    buildLocationConfirmMessage((address ?? "未知地址") + routeSwitchNotice),
+    buildLocationConfirmMessage(address ?? "未知地址", routeSwitchNotice),
   ]);
 }
 
@@ -105,71 +125,197 @@ async function handleTextMessage(
 ): Promise<void> {
   const text = msg.text.trim();
 
-  // 1. 意圖分類
+  // Fast commands (beat official web forms — zero clicks)
+  const radiusMatch = text.match(/^(?:半徑|range)\s*(\d{2,3})$/i);
+  if (radiusMatch) {
+    const radius = clampRadiusMeters(parseInt(radiusMatch[1], 10));
+    const prefs = await setUserPrefs(userId, { radiusMeters: radius });
+    await replyMessage(replyToken, [
+      buildTextMessage(
+        `✅ 搜尋半徑已設為 ${prefs.radiusMeters} 公尺\n` +
+          `（官方可調 50–500，預設 100；我們一樣支援，且會記住你的設定）`
+      ),
+    ]);
+    return;
+  }
+
+  const modeMatch = text.match(/^(?:模式|定位)\s*(推薦|整天|自動|全部)/);
+  if (modeMatch) {
+    const token = modeMatch[1];
+    const locateMode =
+      token === "整天" || token === "全部" ? "all_day" : "recommend";
+    const prefs = await setUserPrefs(userId, { locateMode });
+    await replyMessage(replyToken, [
+      buildTextMessage(
+        `✅ 定位模式：${
+          prefs.locateMode === "recommend"
+            ? "依目前時間推薦（對齊官方「自動」）"
+            : "整天班表／距離優先（對齊官方「全部顯示」）"
+        }\n` +
+          `再傳「垃圾車」即可套用。`
+      ),
+    ]);
+    return;
+  }
+
+  const favSave = text.match(/^(?:收藏|最愛)\s+(.+)$/);
+  if (favSave) {
+    const label = favSave[1].trim().slice(0, 20);
+    // Prefer true home coords for new favorites
+    const user = await getUserByLineId(userId);
+    if (!user?.home_lat || !user?.home_lng) {
+      await replyMessage(replyToken, [
+        buildTextMessage("請先傳送 GPS 位置，再回覆「收藏 公司」。"),
+      ]);
+      return;
+    }
+    const prefs = await upsertFavorite(userId, {
+      label,
+      lat: user.home_lat,
+      lng: user.home_lng,
+      address: label,
+    });
+    await replyMessage(replyToken, [
+      buildTextMessage(
+        `⭐ 已收藏「${label}」並設為追蹤點（最多 3 個）\n` +
+          `目前最愛：${prefs.favorites.map((f) => f.label).join("、")}\n` +
+          `切換：切換 ${label}｜切換 住家｜最愛`
+      ),
+    ]);
+    return;
+  }
+
+  if (/^最愛$/.test(text)) {
+    const prefs = await getUserPrefs(userId);
+    if (prefs.favorites.length === 0) {
+      await replyMessage(replyToken, [
+        buildTextMessage(
+          "尚未收藏地點。傳送 GPS 後回覆「收藏 公司」即可（最多 3 個，優於官方單一我的最愛網頁流程）。"
+        ),
+      ]);
+      return;
+    }
+    const active = prefs.activeFavoriteId
+      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)?.label
+      : "住家";
+    await replyMessage(replyToken, [
+      buildTextMessage(
+        `⭐ 我的最愛\n` +
+          prefs.favorites.map((f, i) => `${i + 1}. ${f.label}`).join("\n") +
+          `\n目前追蹤：${active ?? "住家"}\n` +
+          `指令：切換 公司｜切換 住家`
+      ),
+    ]);
+    return;
+  }
+
+  const switchMatch = text.match(/^切換\s+(.+)$/);
+  if (switchMatch) {
+    const label = switchMatch[1].trim();
+    if (label === "住家" || label === "家") {
+      await clearActiveFavorite(userId);
+      await replyMessage(replyToken, [
+        buildTextMessage("✅ 已切回住家位置追蹤。傳「垃圾車」查看 ETA。"),
+      ]);
+      return;
+    }
+    const prefs = await getUserPrefs(userId);
+    const fav = prefs.favorites.find((f) => f.label === label);
+    if (!fav) {
+      await replyMessage(replyToken, [
+        buildTextMessage(`找不到最愛「${label}」。先傳「最愛」查看清單。`),
+      ]);
+      return;
+    }
+    await setUserPrefs(userId, { activeFavoriteId: fav.id });
+    await replyMessage(replyToken, [
+      buildTextMessage(`✅ 已切換追蹤「${fav.label}」。傳「垃圾車」或「班表」。`),
+    ]);
+    return;
+  }
+
+  const searchMatch = text.match(/^(?:查|搜尋|找)\s*(.+)$/);
+  if (searchMatch) {
+    const keyword = searchMatch[1].trim();
+    const coords = await getActiveCoords(userId);
+    const result = await searchCleanPointsByKeyword(
+      keyword,
+      coords?.lat,
+      coords?.lng
+    );
+    await replyMessage(replyToken, [buildTextMessage(result)]);
+    return;
+  }
+
+  if (/班表|時刻表|清運日/.test(text)) {
+    const coords = await getActiveCoords(userId);
+    if (!coords) {
+      await replyMessage(replyToken, [
+        buildTextMessage("請先傳送 GPS，或傳「查 路名」搜尋班表。"),
+      ]);
+      return;
+    }
+    const prefs = await getUserPrefs(userId);
+    const card = await getScheduleCardForLocation(coords.lat, coords.lng, {
+      locateMode: prefs.locateMode,
+      radiusMeters: prefs.radiusMeters,
+    });
+    await replyMessage(replyToken, [buildTextMessage(card)]);
+    return;
+  }
+
   const intent = await classifyIntent(text);
 
-  // 2. 處理 Help
   if (intent === "help") {
     await replyMessage(replyToken, [buildWelcomeMessage()]);
     return;
   }
 
-  // 3. 處理 ETA
   if (intent === "eta") {
-    const user = await getUserByLineId(userId);
-
-    if (!user?.home_location) {
+    const coords = await getActiveCoords(userId);
+    if (!coords) {
       await replyMessage(replyToken, [
         buildTextMessage(
-          "⚠️ 您還沒有設定住家位置！\n\n" +
-          "請點選 LINE 輸入框左側的「+」→「位置」，" +
-          "傳送您的 GPS 位置後，我就能幫您追蹤附近的垃圾車 🗺️"
+          "⚠️ 您還沒有設定位置！\n\n" +
+            "請點選「+」→「位置」傳送 GPS。\n" +
+            "也可先「查 路名」搜尋班表。"
         ),
       ]);
       return;
     }
 
-    // Get lat/lng stored in denormalized columns via RPC
-    const { createClient } = await import("@supabase/supabase-js");
-    const db = createClient(
-      config.supabase.url,
-      config.supabase.serviceRoleKey,
-      { auth: { persistSession: false } }
-    );
-
-    const { data: coords } = await db.rpc("get_user_coords", {
-      p_line_user_id: userId,
+    const prefs = await getUserPrefs(userId);
+    const eta = await calculateEta(coords.lat, coords.lng, {
+      locateMode: prefs.locateMode,
+      radiusMeters: prefs.radiusMeters,
     });
-
-    const coordData = coords as { lat: number; lng: number } | null;
-    if (!coordData?.lat) {
-      await replyMessage(replyToken, [
-        buildTextMessage("⚠️ 無法讀取您的位置資料，請重新傳送 GPS 位置。"),
-      ]);
-      return;
-    }
-
-    const eta = await calculateEta(coordData.lat, coordData.lng);
-    await replyMessage(replyToken, buildEtaMessages(eta));
+    const prefix =
+      coords.label !== "住家"
+        ? buildTextMessage(`📍 目前追蹤最愛：${coords.label}`)
+        : null;
+    const messages = buildEtaMessages(eta);
+    await replyMessage(
+      replyToken,
+      prefix ? [prefix, ...messages] : messages
+    );
     return;
   }
 
-  // 4. 處理 RAG 問題
   if (intent === "rag") {
     const answer = await generateRagResponse(text);
     await replyMessage(replyToken, [buildTextMessage(answer)]);
     return;
   }
 
-  // 5. Default fallback (unknown)
   await replyMessage(replyToken, [
     buildTextMessage(
-      "🤔 我不太懂這個指令...\n\n" +
-      "💡 試試看：\n" +
-      "• 傳送「垃圾車在哪」→ 查詢 ETA\n" +
-      "• 傳送「為什麼垃圾車今天沒來」→ 查詢知識庫\n" +
-      "• 傳送 GPS 位置 → 綁定住家\n" +
-      "• 傳送「幫助」→ 查看使用說明"
+      "🤔 可以這樣用（每項都比官方網頁快）：\n" +
+        "• 垃圾車 → 即時 ETA＋推播\n" +
+        "• 班表 → 整週清運日\n" +
+        "• 查 中正路 → 關鍵字搜尋\n" +
+        "• 半徑 200／模式 推薦｜整天\n" +
+        "• 收藏 公司／切換 公司／最愛\n" +
+        "• 傳送 GPS → 綁定住家"
     ),
   ]);
 }
@@ -181,8 +327,6 @@ async function handleFollowEvent(
   await replyMessage(replyToken, [buildWelcomeMessage()]);
 }
 
-// ── Main Vercel handler ───────────────────────────────────────
-
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
@@ -192,7 +336,6 @@ export default async function handler(
     return;
   }
 
-  // Raw body for HMAC verification
   const rawBody =
     typeof req.body === "string" ? req.body : JSON.stringify(req.body);
 
@@ -212,7 +355,6 @@ export default async function handler(
     return;
   }
 
-  // Process all events concurrently; individual failures don't abort others
   await Promise.allSettled(
     events.map(async (event: Event) => {
       try {
@@ -248,9 +390,6 @@ export default async function handler(
         }
       } catch (err) {
         console.error("[Webhook] Handler error:", err);
-
-        // Always try to tell the user something went wrong — silent failure
-        // is what previously looked like "LINE 無反應".
         try {
           const replyToken =
             event.type === "follow"

@@ -8,6 +8,8 @@ export interface User {
   id: string; // UUID
   line_user_id: string;
   home_location: string | null; // WKT: POINT(lng lat) returned by PostGIS
+  home_lat: number | null;
+  home_lng: number | null;
   created_at: string;
 }
 
@@ -180,6 +182,21 @@ export interface EtaResult {
   recyclingEtaSource?: "official" | "estimated";
   /** True when we switched to a nearby alternate route with live trucks */
   usedAlternateRoute?: boolean;
+  /** City/stop has no garbage or recycle service today */
+  noServiceToday?: boolean;
+  /** Taiwan weekday 1–7 when noServiceToday */
+  weekday?: number;
+  trashDays?: string;
+  recycleDays?: string;
+  locateMode?: "recommend" | "all_day";
+  radiusMeters?: number;
+  /** Nearby uncleared / pending stops for map overlay */
+  nearbyUncleared?: Array<{
+    name: string;
+    lat: number;
+    lng: number;
+    scheduledTime?: string;
+  }>;
 }
 
 // ── LINE Event types (minimal, extends @line/bot-sdk) ────────

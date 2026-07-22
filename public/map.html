@@ -117,6 +117,17 @@
       font-size: 20px;
       box-shadow: 0 2px 5px rgba(0,0,0,0.3);
     }
+    .near-icon {
+      background: #fff7ed;
+      border: 2px solid #f97316;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 20px;
+      font-size: 11px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      color: #9a3412;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
@@ -153,8 +164,19 @@
     const stopName = params.get('stop') || '清運點';
     const etaParam = params.get('eta');
     const eta = etaParam !== null && etaParam !== '' ? parseInt(etaParam, 10) : NaN;
-    const waitingSignal = params.get('waiting') === '1' || (Number.isNaN(eta) && (isNaN(tLat) || isNaN(tLng)));
-
+    const noService = params.get('noService') === '1';
+    const waitingSignal = !noService && (params.get('waiting') === '1' || (Number.isNaN(eta) && (isNaN(tLat) || isNaN(tLng))));
+    const radiusMeters = parseInt(params.get('radius') || '100', 10);
+    const nearRaw = params.get('near') || '';
+    const nearPoints = nearRaw
+      .split('|')
+      .map((chunk) => {
+        const [latStr, lngStr] = chunk.split(',');
+        const lat = parseFloat(latStr);
+        const lng = parseFloat(lngStr);
+        return { lat, lng };
+      })
+      .filter((p) => !isNaN(p.lat) && !isNaN(p.lng));
 
     // 2. Setup map
     const map = L.map('map', {
@@ -203,12 +225,38 @@
     if (!isNaN(uLat) && !isNaN(uLng)) {
       L.marker([uLat, uLng], {icon: userIcon}).addTo(map).bindPopup('您的位置');
       bounds.extend([uLat, uLng]);
+      if (!isNaN(radiusMeters) && radiusMeters >= 50) {
+        L.circle([uLat, uLng], {
+          radius: radiusMeters,
+          color: '#10b981',
+          weight: 1,
+          fillColor: '#10b981',
+          fillOpacity: 0.08
+        }).addTo(map);
+      }
     }
     
     if (!isNaN(sLat) && !isNaN(sLng)) {
       L.marker([sLat, sLng], {icon: stopIcon}).addTo(map).bindPopup(stopName);
       bounds.extend([sLat, sLng]);
     }
+
+    nearPoints.forEach((p, idx) => {
+      // Skip duplicate of primary stop
+      if (!isNaN(sLat) && !isNaN(sLng) && Math.abs(p.lat - sLat) < 1e-5 && Math.abs(p.lng - sLng) < 1e-5) {
+        return;
+      }
+      const nearIcon = L.divIcon({
+        className: 'near-icon',
+        html: String(idx + 1),
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      });
+      L.marker([p.lat, p.lng], { icon: nearIcon })
+        .addTo(map)
+        .bindPopup(`附近待清運點 #${idx + 1}`);
+      bounds.extend([p.lat, p.lng]);
+    });
     
     if (!isNaN(tLat) && !isNaN(tLng)) {
       L.marker([tLat, tLng], {icon: truckIcon}).addTo(map).bindPopup('垃圾車 (' + carNo + ')');
@@ -255,7 +303,11 @@
     document.getElementById('stopName').textContent = decodeURIComponent(stopName);
     
     const badge = document.getElementById('etaBadge');
-    if (waitingSignal) {
+    if (noService) {
+      badge.textContent = '今日無收運';
+      badge.style.background = '#fee2e2';
+      badge.style.color = '#dc2626';
+    } else if (waitingSignal) {
       badge.textContent = '等待即時訊號';
       badge.style.background = '#f59e0b';
     } else if (!Number.isNaN(eta) && eta <= 1) {
@@ -263,6 +315,10 @@
       badge.classList.add('urgent');
     } else if (!Number.isNaN(eta)) {
       badge.textContent = `約 ${eta} 分鐘`;
+    } else if (nearPoints.length > 0) {
+      badge.textContent = `附近 ${nearPoints.length} 點`;
+      badge.style.background = '#ffedd5';
+      badge.style.color = '#9a3412';
     } else {
       badge.textContent = '暫無 ETA';
     }

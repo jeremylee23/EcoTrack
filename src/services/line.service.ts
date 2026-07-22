@@ -70,7 +70,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     eta.etaMinutes === undefined &&
     eta.recyclingEtaMinutes === undefined &&
     !eta.nextGarbageDate &&
-    !eta.nextRecycleDate
+    !eta.nextRecycleDate &&
+    !eta.noServiceToday
   ) {
     return [buildTextMessage(eta.message)];
   }
@@ -94,19 +95,35 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     params.append("stop", eta.nearestStopName || eta.nearestStopAddress || "");
   }
   if (eta.etaMinutes !== undefined) params.append("eta", eta.etaMinutes.toString());
+  if (eta.noServiceToday) params.append("noService", "1");
   if (
     eta.etaMinutes === undefined &&
     !eta.nextGarbageDate &&
-    eta.scheduledTime
+    eta.scheduledTime &&
+    !eta.noServiceToday
   ) {
     params.append("waiting", "1");
   }
+  // Compact nearby uncleared points (official map shows uncleared; we overlay them)
+  if (eta.nearbyUncleared && eta.nearbyUncleared.length > 0) {
+    const near = eta.nearbyUncleared
+      .slice(0, 8)
+      .map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`)
+      .join("|");
+    params.append("near", near);
+    params.append("nearN", String(Math.min(8, eta.nearbyUncleared.length)));
+  }
+  if (eta.radiusMeters) params.append("radius", String(eta.radiusMeters));
   const mapUrl = `${baseUrl}?${params.toString()}`;
+
+  const altText = eta.noServiceToday
+    ? `今日無收運｜下次 ${eta.nextGarbageDate ?? eta.nextRecycleDate ?? "見班表"}`
+    : `垃圾車預估 ETA: ${eta.etaMinutes ?? "?"} 分鐘`;
 
   // Build Flex Message
   const flexMessage: FlexMessage = {
     type: "flex",
-    altText: `垃圾車預估 ETA: ${eta.etaMinutes ?? "?"} 分鐘`,
+    altText,
     contents: {
       type: "bubble",
       size: "giga",
@@ -128,7 +145,9 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.nextGarbageDate
+                text: eta.noServiceToday
+                  ? (eta.nextGarbageDate ? `今日無收運｜下次 ${eta.nextGarbageDate}` : "今日無收運")
+                  : eta.nextGarbageDate
                   ? (eta.isGarbagePassed ? `已過站，下次 ${eta.nextGarbageDate}` : `下次 ${eta.nextGarbageDate}`)
                   : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
                     ? "即將抵達" 
@@ -136,8 +155,10 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                       ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)`
                       : (eta.scheduledTime ? `表定 ${eta.scheduledTime}（等待訊號）` : "未知"))),
                 weight: "bold",
-                size: eta.nextGarbageDate ? "sm" : (eta.etaMinutes === undefined && eta.scheduledTime ? "sm" : "md"),
-                color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : (eta.etaMinutes === undefined ? "#f59e0b" : "#3b82f6")),
+                size: eta.nextGarbageDate || eta.noServiceToday ? "sm" : (eta.etaMinutes === undefined && eta.scheduledTime ? "sm" : "md"),
+                color: eta.noServiceToday
+                  ? "#dc2626"
+                  : eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : (eta.etaMinutes === undefined ? "#f59e0b" : "#3b82f6")),
                 margin: "md",
                 flex: 1,
                 wrap: true
@@ -151,20 +172,41 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               },
               {
                 type: "text",
-                text: eta.nextRecycleDate
+                text: eta.noServiceToday
+                  ? (eta.nextRecycleDate ? `下次 ${eta.nextRecycleDate}` : "今日無回收")
+                  : eta.nextRecycleDate
                   ? (eta.isRecyclePassed ? `已過站，下次 ${eta.nextRecycleDate}` : `下次 ${eta.nextRecycleDate}`)
                   : (eta.recyclingEtaMinutes !== undefined 
                     ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
                     : (eta.scheduledTime && !eta.nextGarbageDate ? `表定 ${eta.scheduledTime}` : "無資料")),
                 weight: "bold",
-                size: eta.nextRecycleDate ? "sm" : "md",
-                color: eta.nextRecycleDate ? "#9ca3af" : (eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981"),
+                size: eta.nextRecycleDate || eta.noServiceToday ? "sm" : "md",
+                color: eta.noServiceToday
+                  ? "#9ca3af"
+                  : eta.nextRecycleDate ? "#9ca3af" : (eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981"),
                 margin: "md",
                 flex: 1,
                 wrap: true
               }
             ]
           },
+          ...(eta.noServiceToday ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#fef2f2" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: "🚫 官方只顯示「今日無收運服務」；我們直接附上下次清運時間。傳「班表」可看整週。",
+                color: "#991b1b" as const,
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
           ...(eta.isStale ? [{
             type: "box" as const,
             layout: "vertical" as const,
@@ -184,7 +226,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               }
             ]
           }] : []),
-          ...(eta.etaMinutes === undefined && !eta.nextGarbageDate && eta.scheduledTime ? [{
+          ...(eta.etaMinutes === undefined && !eta.nextGarbageDate && eta.scheduledTime && !eta.noServiceToday ? [{
             type: "box" as const,
             layout: "vertical" as const,
             margin: "md" as const,
@@ -213,6 +255,23 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 type: "text" as const,
                 text: "🔄 原路線暫無訊號，已改追蹤附近 100 公尺內有車的替代路線。",
                 color: "#1d4ed8" as const,
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...((eta.nearbyUncleared?.length ?? 0) > 1 ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#fff7ed" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: `🚩 附近待清運點 ${eta.nearbyUncleared!.length} 處（地圖可一次看完，優於官方逐點點選）`,
+                color: "#9a3412" as const,
                 size: "xs" as const,
                 wrap: true
               }
@@ -323,6 +382,28 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   }
                 ]
               },
+              ...(eta.locateMode || eta.radiusMeters ? [{
+                type: "box" as const,
+                layout: "baseline" as const,
+                spacing: "sm" as const,
+                contents: [
+                  {
+                    type: "text" as const,
+                    text: "搜尋",
+                    color: "#aaaaaa",
+                    size: "sm" as const,
+                    flex: 1
+                  },
+                  {
+                    type: "text" as const,
+                    text: `${eta.locateMode === "all_day" ? "整天班表" : "依時間推薦"}｜半徑 ${eta.radiusMeters ?? 100}m`,
+                    wrap: true,
+                    color: "#666666",
+                    size: "sm" as const,
+                    flex: 4
+                  }
+                ]
+              }] : []),
               ...(eta.historicalAvgTime ? [{
                 type: "box" as const,
                 layout: "baseline" as const,
@@ -355,11 +436,15 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
               {
                 type: "button",
                 style: "primary",
-                color: (!eta.nextGarbageDate && !eta.nextRecycleDate) ? "#10b981" : "#d1d5db",
+                color: eta.noServiceToday
+                  ? "#6b7280"
+                  : (!eta.nextGarbageDate && !eta.nextRecycleDate) ? "#10b981" : "#d1d5db",
                 height: "sm",
                 action: {
                   type: "uri",
-                  label: "🗺️ 開啟即時追蹤地圖",
+                  label: eta.noServiceToday
+                    ? "🗺️ 開啟地圖（看站點）"
+                    : "🗺️ 開啟即時追蹤地圖",
                   uri: mapUrl
                 }
               }
@@ -373,24 +458,31 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
   return [flexMessage];
 }
 
-export function buildLocationConfirmMessage(address: string): TextMessage {
+export function buildLocationConfirmMessage(
+  address: string,
+  extraNotice = ""
+): TextMessage {
   return buildTextMessage(
     `📍 已記錄您的位置！\n` +
-      `📌 地址：${address}\n\n` +
-      `✅ 設定完成！未來點擊查詢時，我將為您計算離此地最近的垃圾車動態。\n\n` +
-      `💡 您可以隨時傳送新的位置來更新設定。\n` +
-      `🔍 查詢：點擊下方「查詢垃圾車 ETA」即可查看。`
+      `📌 地址：${address}` +
+      (extraNotice ? `\n${extraNotice}` : "") +
+      `\n\n✅ 設定完成！傳「垃圾車」查即時 ETA，傳「班表」看整週。\n` +
+      `⭐ 收藏 公司｜切換 公司｜最愛\n` +
+      `📏 半徑 200｜⚙️ 模式 推薦｜整天｜🔍 查 路名`
   );
 }
 
 export function buildWelcomeMessage(): TextMessage {
   return buildTextMessage(
-    `👋 歡迎使用新竹市垃圾車追蹤 Bot！\n\n` +
-      `🗺️ 使用方式：\n` +
-      `1️⃣ 點擊下方「📍 設定住家位置」\n` +
-      `2️⃣ 點擊下方「🚛 查詢垃圾車 ETA」\n\n` +
-      `📡 服務範圍：新竹市全市\n` +
-      `⚡ 即時連線：保證為您抓取當下的即時 GPS 座標`
+    `👋 歡迎使用 EcoTrack（比官方清運網更快一層）\n\n` +
+      `📍 先傳 GPS 綁定住家，再試這些指令：\n` +
+      `• 垃圾車 → 即時 ETA＋靠近推播\n` +
+      `• 班表 → 整週清運日（優於官方彈窗）\n` +
+      `• 查 中正路 → 關鍵字搜尋＋距離排序\n` +
+      `• 半徑 50~500｜模式 推薦／整天\n` +
+      `• 收藏 公司｜切換 公司｜最愛（最多 3 點）\n\n` +
+      `🗺️ 地圖可一次看附近待清運點\n` +
+      `📡 服務範圍：新竹市全市`
   );
 }
 

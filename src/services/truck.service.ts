@@ -32,6 +32,8 @@ import {
   isSequencePastStop,
   type EtaSource,
 } from "../utils/eta-policy.util.js";
+import { clampRadiusMeters, type LocateMode } from "./prefs.service.js";
+import { formatWeekSchedule } from "./schedule.service.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -51,9 +53,6 @@ function getRedis(): Redis {
 
 const TRUCK_KEY = (routeId: string) => `truck_live:${routeId}`;
 const USER_ROUTE_KEY = (userId: string) => `user_route:${userId}`;
-// Round coordinates to ~11m so repeated queries from the same spot share a cache entry.
-const POINTS_CACHE_KEY = (lat: number, lng: number) =>
-  `points_cache:${lat.toFixed(4)}:${lng.toFixed(4)}`;
 
 // Stale threshold: GPS older than 6 hours is considered "today unavailable"
 // (Truck ran earlier / yesterday, GPS off now — don't mislead with fake ETAs)
@@ -61,13 +60,28 @@ const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
 // Soft warning: GPS older than this still usable for ETA, but UI should warn.
 const STALE_WARN_MS = 15 * 60 * 1000;
 
-// Official point query radii. Start narrow and widen to match the government UX.
-const POINT_SEARCH_RADII_M = [120, 200, 300, 500] as const;
 const DEFAULT_GARBAGE_DAYS = [1, 2, 4, 5, 6] as const;
 const OFFICIAL_LIVE_STATUS = "1";
 const CAR_STATUS_DONE = "1";
 // When primary route has no live signal, try other nearby stops within this radius.
 const ALT_ROUTE_RADIUS_M = 100;
+
+export interface CalculateEtaOptions {
+  locateMode?: LocateMode;
+  radiusMeters?: number;
+}
+
+function buildSearchRadii(preferredMeters: number): number[] {
+  const base = clampRadiusMeters(preferredMeters);
+  return [...new Set([base, Math.min(500, base + 100), Math.min(500, base + 200), 500])];
+}
+
+const POINTS_CACHE_KEY = (
+  lat: number,
+  lng: number,
+  radius: number,
+  mode: LocateMode
+) => `points_cache:${lat.toFixed(4)}:${lng.toFixed(4)}:r${radius}:${mode}`;
 
 interface NearbyPointCandidate {
   point: HccgCleanPoint;
@@ -176,7 +190,8 @@ function getCandidateTimePenalty(candidate: NearbyPointCandidate): number {
 
 function comparePointCandidates(
   left: NearbyPointCandidate,
-  right: NearbyPointCandidate
+  right: NearbyPointCandidate,
+  locateMode: LocateMode = "recommend"
 ): number {
   const leftHasEta =
     left.garbageEtaMinutes !== undefined ||
@@ -193,6 +208,11 @@ function comparePointCandidates(
     return leftHasTodayService ? -1 : 1;
   }
 
+  // Official "全部顯示": prioritize pure distance. "自動/推薦": keep schedule proximity.
+  if (locateMode === "all_day") {
+    return left.distanceMeters - right.distanceMeters;
+  }
+
   const timePenaltyDelta =
     getCandidateTimePenalty(left) - getCandidateTimePenalty(right);
   if (timePenaltyDelta !== 0) return timePenaltyDelta;
@@ -202,17 +222,21 @@ function comparePointCandidates(
 
 async function fetchNearbyPointsFromHccg(
   userLat: number,
-  userLng: number
+  userLng: number,
+  radii: number[],
+  locateMode: LocateMode
 ): Promise<HccgCleanPoint[]> {
   let lastError: Error | null = null;
+  // Official locatemode: 1 ≈ auto/recommend by time; 0 ≈ show all in range.
+  const locatemode = locateMode === "all_day" ? "0" : "1";
 
-  for (const radius of POINT_SEARCH_RADII_M) {
+  for (const radius of radii) {
     try {
       const params = new URLSearchParams({
         lat: userLat.toString(),
         lon: userLng.toString(),
         range: radius.toString(),
-        locatemode: "1",
+        locatemode,
       });
 
       const response = await fetch(
@@ -258,15 +282,15 @@ async function fetchNearbyPointsFromHccg(
 
 /**
  * Cached wrapper around fetchNearbyPointsFromHccg.
- * Caches non-empty results in Redis for a short window to reduce official API
- * load and stabilize responses. Empty results are never cached so they retry.
  */
 async function fetchNearbyPointsCached(
   userLat: number,
-  userLng: number
+  userLng: number,
+  radiusMeters: number,
+  locateMode: LocateMode
 ): Promise<HccgCleanPoint[]> {
   const redis = getRedis();
-  const cacheKey = POINTS_CACHE_KEY(userLat, userLng);
+  const cacheKey = POINTS_CACHE_KEY(userLat, userLng, radiusMeters, locateMode);
 
   try {
     const cached = await redis.get<HccgCleanPoint[]>(cacheKey);
@@ -275,7 +299,12 @@ async function fetchNearbyPointsCached(
     console.error("[TruckService] Nearby points cache read failed:", error);
   }
 
-  const points = await fetchNearbyPointsFromHccg(userLat, userLng);
+  const points = await fetchNearbyPointsFromHccg(
+    userLat,
+    userLng,
+    buildSearchRadii(radiusMeters),
+    locateMode
+  );
 
   if (points.length > 0) {
     redis
@@ -294,12 +323,20 @@ async function fetchNearbyPointsCached(
  */
 async function selectNearbyCandidates(
   userLat: number,
-  userLng: number
+  userLng: number,
+  options: CalculateEtaOptions = {}
 ): Promise<NearbyPointCandidate[]> {
+  const locateMode = options.locateMode ?? "recommend";
+  const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
   let nearbyPoints: HccgCleanPoint[] = [];
 
   try {
-    nearbyPoints = await fetchNearbyPointsCached(userLat, userLng);
+    nearbyPoints = await fetchNearbyPointsCached(
+      userLat,
+      userLng,
+      radiusMeters,
+      locateMode
+    );
   } catch (error) {
     console.error("[TruckService] Failed to fetch nearby points:", error);
   }
@@ -308,14 +345,15 @@ async function selectNearbyCandidates(
 
   return nearbyPoints
     .map((point) => buildPointCandidate(userLat, userLng, point))
-    .sort(comparePointCandidates);
+    .sort((a, b) => comparePointCandidates(a, b, locateMode));
 }
 
 async function selectNearbyCandidate(
   userLat: number,
-  userLng: number
+  userLng: number,
+  options: CalculateEtaOptions = {}
 ): Promise<NearbyPointCandidate | null> {
-  const candidates = await selectNearbyCandidates(userLat, userLng);
+  const candidates = await selectNearbyCandidates(userLat, userLng, options);
   return candidates[0] ?? null;
 }
 
@@ -356,15 +394,117 @@ function candidateHasOfficialEta(candidate: NearbyPointCandidate): boolean {
  */
 export async function resolveNearestRoute(
   userLat: number,
-  userLng: number
+  userLng: number,
+  options: CalculateEtaOptions = {}
 ): Promise<{ routeId: string; routeName: string } | null> {
-  const candidate = await selectNearbyCandidate(userLat, userLng);
+  const candidate = await selectNearbyCandidate(userLat, userLng, options);
   if (!candidate) return null;
 
   return {
     routeId: candidate.point.routeId,
     routeName: candidate.point.routeName,
   };
+}
+
+/**
+ * Keyword / address / route search — mirrors official site filters, but returns
+ * a ranked LINE-friendly summary with schedule + distance when coords known.
+ */
+export async function searchCleanPointsByKeyword(
+  keyword: string,
+  userLat?: number,
+  userLng?: number
+): Promise<string> {
+  const q = keyword.trim();
+  if (!q) return "請輸入關鍵字，例如：查 中正路、查 東門、查 香山大庄";
+
+  const params = new URLSearchParams({ address: q });
+  const response = await fetch(
+    `${config.hccg.baseUrl}/getPointData?${params.toString()}`,
+    {
+      headers: {
+        Referer: config.hccg.referer,
+        "User-Agent": "EcoTrack-Bot/1.0",
+      },
+      signal: AbortSignal.timeout(8_000),
+    }
+  );
+
+  if (!response.ok) {
+    return "⚠️ 官方班表服務暫時無法搜尋，請稍後再試。";
+  }
+
+  const json = (await response.json()) as HccgApiResponse<HccgCleanPointData>;
+  if (json.statusCode !== 1 || !json.data?.cleanPoint?.length) {
+    return `🔍 找不到「${q}」相關清運點。\n試試更短的路名／地標，或傳 GPS 讓我依位置推薦。`;
+  }
+
+  const points = json.data.cleanPoint
+    .filter((p) => isValidCoordinate(parseFloat(p.lat), parseFloat(p.lon)))
+    .slice(0, 80);
+
+  const scored = points.map((point) => {
+    const lat = parseFloat(point.lat);
+    const lng = parseFloat(point.lon);
+    const distanceMeters =
+      userLat !== undefined && userLng !== undefined
+        ? haversineDistance(userLat, userLng, lat, lng) * 1000
+        : Number.POSITIVE_INFINITY;
+    return { point, distanceMeters };
+  });
+
+  scored.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  const top = scored.slice(0, 5);
+
+  const lines = top.map((item, idx) => {
+    const p = item.point;
+    const time = parseScheduledTime(p.time) ?? p.time ?? "未知";
+    const dist =
+      Number.isFinite(item.distanceMeters) && item.distanceMeters < 50_000
+        ? `｜距你約 ${Math.round(item.distanceMeters)}m`
+        : "";
+    return (
+      `${idx + 1}. ${p.pointName || p.address}\n` +
+      `   路線 ${p.routeName}｜表定 ${time}${dist}\n` +
+      `   垃圾：${p.trashDay || "?"}｜回收：${p.recycleDay || "?"}`
+    );
+  });
+
+  return (
+    `🔍 搜尋「${q}」（優於官方：可搭配你的位置排序）\n\n` +
+    lines.join("\n\n") +
+    `\n\n💡 傳「班表」看住家整週；傳「垃圾車」追即時 ETA；靠近 5 分鐘會推播。`
+  );
+}
+
+/**
+ * Build a weekly schedule card for the user's coordinate.
+ */
+export async function getScheduleCardForLocation(
+  userLat: number,
+  userLng: number,
+  options: CalculateEtaOptions = {}
+): Promise<string> {
+  const candidate = await selectNearbyCandidate(userLat, userLng, options);
+  if (!candidate) {
+    return "⚠️ 附近找不到清運點，請先傳送 GPS 或傳「查 路名」搜尋。";
+  }
+
+  const historicalAvg =
+    parseInt(candidate.point.seq, 10) > 0
+      ? await getHistoricalAverage(
+          candidate.point.routeId,
+          parseInt(candidate.point.seq, 10)
+        )
+      : undefined;
+
+  return formatWeekSchedule({
+    stopName: candidate.point.pointName || candidate.point.address,
+    scheduledTime: candidate.scheduledTime,
+    trashDays: candidate.point.trashDay,
+    recycleDays: candidate.point.recycleDay,
+    historicalAvgTime: (historicalAvg ?? candidate.point.historyTime) || undefined,
+  });
 }
 
 function getTruckAgeMs(truck: TruckLiveData): number {
@@ -472,16 +612,24 @@ export async function setUserRouteId(userId: string, routeId: string, routeName:
  */
 export async function calculateEta(
   userLat: number,
-  userLng: number
+  userLng: number,
+  options: CalculateEtaOptions = {}
 ): Promise<EtaResult> {
-  const candidates = await selectNearbyCandidates(userLat, userLng);
+  const locateMode = options.locateMode ?? "recommend";
+  const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
+  const candidates = await selectNearbyCandidates(userLat, userLng, {
+    locateMode,
+    radiusMeters,
+  });
   let candidate = candidates[0];
 
   if (!candidate) {
     return {
       found: false,
       message:
-        "⚠️ 找不到您附近的清運點，請確認 GPS 位置是否正確，或改在表定時間前後再查一次。",
+        "⚠️ 找不到您附近的清運點，請確認 GPS 位置是否正確，或改在表定時間前後再查一次。\n💡 也可傳「半徑 200」加大搜尋範圍（50–500，官方預設 100）。",
+      locateMode,
+      radiusMeters,
     };
   }
 
@@ -522,6 +670,63 @@ export async function calculateEta(
   const targetSequence = parseInt(point.seq, 10) || 0;
   const formattedTime = candidate.scheduledTime ?? "未知";
   const stopName = point.pointName || point.address;
+  const weekday = getTaiwanWeekday();
+
+  const nearbyUncleared = candidates
+    .filter((c) => c.hasTodayGarbage || c.hasTodayRecycling)
+    .filter((c) => c.distanceMeters <= radiusMeters)
+    .slice(0, 12)
+    .map((c) => ({
+      name: c.point.pointName || c.point.address,
+      lat: parseFloat(c.point.lat),
+      lng: parseFloat(c.point.lon),
+      scheduledTime: c.scheduledTime ?? undefined,
+    }));
+
+  // Beat official banner: explicit no-service day with next pickup.
+  if (!candidate.hasTodayGarbage && !candidate.hasTodayRecycling) {
+    const nextGarbageInfo = getNextScheduledArrival(
+      point.trashDay,
+      candidate.scheduledTime,
+      true,
+      [...DEFAULT_GARBAGE_DAYS]
+    );
+    const nextRecycleInfo = getNextScheduledArrival(
+      point.recycleDay,
+      candidate.scheduledTime,
+      true
+    );
+    return {
+      found: true,
+      routeId,
+      routeName: point.routeName,
+      nearestStopName: point.pointName || undefined,
+      nearestStopAddress: point.address || undefined,
+      stopLat,
+      stopLng,
+      userLat,
+      userLng,
+      scheduledTime: formattedTime,
+      nextGarbageDate: nextGarbageInfo?.dateStr,
+      nextRecycleDate: nextRecycleInfo?.dateStr,
+      isGarbagePassed: true,
+      isRecyclePassed: true,
+      noServiceToday: true,
+      weekday,
+      trashDays: point.trashDay,
+      recycleDays: point.recycleDay,
+      locateMode,
+      radiusMeters,
+      nearbyUncleared: [],
+      message:
+        `🚫 今日無收運服務（優於官方：直接給下次時間）\n` +
+        `📍 ${stopName}\n` +
+        `🕐 表定：${formattedTime}\n` +
+        (nextGarbageInfo ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}\n` : "") +
+        (nextRecycleInfo ? `♻️ 下次回收車：${nextRecycleInfo.dateStr}\n` : "") +
+        `\n💡 傳「班表」看整週；有班日會在車距約 5 分鐘時主動推播。`,
+    };
+  }
 
   const historicalAvg =
     targetSequence > 0
@@ -640,6 +845,11 @@ export async function calculateEta(
       isGarbagePassed,
       isRecyclePassed,
       usedAlternateRoute,
+      trashDays: point.trashDay,
+      recycleDays: point.recycleDay,
+      locateMode,
+      radiusMeters,
+      nearbyUncleared,
       message:
         `📍 最近清運點：${stopName}\n` +
         `🕐 官方表定：${formattedTime}${historicalText}\n` +
@@ -714,6 +924,10 @@ export async function calculateEta(
   const messageLines = [
     `📍 最近清運點：${stopName}`,
     usedAlternateRoute ? "🔄 已改追蹤附近有車的替代路線" : null,
+    `🔎 模式：${locateMode === "recommend" ? "依時間推薦" : "整天班表"}｜半徑 ${radiusMeters}m`,
+    nearbyUncleared.length > 1
+      ? `🚩 附近待清運點：${nearbyUncleared.length} 處（地圖可看）`
+      : null,
     `🕐 官方表定：${formattedTime}`,
     historicalReference ? `📊 歷史平均：約 ${historicalReference}` : null,
     garbageEtaMinutes !== undefined
@@ -762,6 +976,11 @@ export async function calculateEta(
     garbageEtaSource,
     recyclingEtaSource,
     usedAlternateRoute,
+    trashDays: point.trashDay,
+    recycleDays: point.recycleDay,
+    locateMode,
+    radiusMeters,
+    nearbyUncleared,
   };
 }
 

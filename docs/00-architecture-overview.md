@@ -58,16 +58,25 @@ GitHub Actions
 
 ```
 用戶查詢 → handleTextMessage()
-  → getUserByLineId() [確認有綁定位置]
-  → get_user_coords() [Supabase RPC 取座標]
-  → calculateEta(lat, lng)
-      → getNearestStop() [PostGIS，回傳最多 20 個站點]
-      → 篩選有即時車輛的站點（先查 HCCG API）
-      → syncSingleTruckFromHccg(routeId) [只查單一路線 GPS]
-      → Redis fallback（限 6 小時內資料）
-      → 若主路線無車 → 嘗試 100m 內其他路線
+  → getUserPrefs() [半徑／定位模式／最愛追蹤點]
+  → getActiveCoords() [最愛或住家]
+  → calculateEta(lat, lng, { locateMode, radiusMeters })
+      → HCCG getPointData（radius + locatemode，對齊官方）
+      → 今日無收運 → 直接回下次清運時間（優於官方彈窗）
+      → syncSingleTruckFromHccg(routeId) + Redis fallback
+      → 附近待清運點 → 地圖 overlay
   → buildEtaMessages() [Flex Message 卡片]
 ```
+
+### 2b. 進階文字指令（對齊並勝過官方清運網）
+
+| 指令 | 功能 |
+|------|------|
+| `班表` | 整週清運日＋歷史平均 |
+| `查 中正路` | 關鍵字／路名搜尋＋距離排序 |
+| `半徑 200` | 搜尋半徑 50–500（預設 100） |
+| `模式 推薦` / `模式 整天` | 對齊官方自動／全部顯示 |
+| `收藏 公司` / `切換 公司` / `最愛` | 最多 3 個追蹤點（Redis） |
 
 ### 3. 背景同步與提醒
 
