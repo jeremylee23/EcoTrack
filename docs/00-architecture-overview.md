@@ -25,10 +25,9 @@ Vercel Serverless Function
                           └── getTruckLiveData() → Upstash Redis (fallback)
 
 Vercel Cron Job
-  /api/cron/sync-trucks.ts     (每日 00:00 UTC)
-  /api/health                  (每 6 小時，Supabase keep-alive)
+  /api/cron/sync-trucks.ts     (每日 00:00 UTC；Hobby 僅支援每日 cron)
 GitHub Actions
-  Keep Supabase Alive          (每 6 小時)
+  Keep Supabase Alive          (每 6 小時打 /api/health)
   Notify Approaching Trucks    (每 10 分鐘 → /api/cron/notify-approaching)
 ```
 
@@ -75,10 +74,10 @@ GitHub Actions
 ```
 Vercel Cron
   每日 00:00 UTC → /api/cron/sync-trucks（全區 GPS → Redis）
-  每 6 小時     → /api/health（查 users，維持 Supabase 活動）
+  （Hobby 方案僅允許每日 cron；更頻繁的 keep-alive 改由 GitHub Actions）
 
 GitHub Actions
-  每 6 小時  → Keep Supabase Alive（檢查 database=connected）
+  每 6 小時  → Keep Supabase Alive（打 /api/health，檢查 database=connected）
   每 10 分鐘 → Notify Approaching（ETA≤5 分鐘 LINE Push）
 ```
 
