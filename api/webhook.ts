@@ -654,15 +654,12 @@ async function handleTextMessage(
       radiusMeters: prefs.radiusMeters,
       locateMode: "all_day",
     });
-    const header =
-      coords.label !== "住家"
-        ? buildTextMessage(`📍 以「${coords.label}」為中心`)
-        : null;
-    const card = buildNearbyStopsFlex(guide);
-    await replyMessage(
-      replyToken,
-      header ? [header, card] : [card]
+    const header = buildTextMessage(
+      `📍 以「${coords.label}」為中心` +
+        (coords.address ? `\n${coords.address}` : "")
     );
+    const card = buildNearbyStopsFlex(guide);
+    await replyMessage(replyToken, [header, card]);
     return;
   }
 
