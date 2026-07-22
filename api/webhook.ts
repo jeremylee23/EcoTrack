@@ -8,7 +8,6 @@ import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
 import {
   upsertUserLocation,
-  getUserByLineId,
   setNotifyEnabled,
 } from "../src/services/user.service.js";
 import {
@@ -25,6 +24,10 @@ import {
   buildEtaMessages,
   buildLocationConfirmMessage,
   buildWelcomeMessage,
+  buildFavoritesMenuFlex,
+  buildPickFavoriteNameFlex,
+  buildAskSendLocationFlex,
+  buildDeleteFavoriteFlex,
   withQuickReply,
   attachQuickReplyToLast,
 } from "../src/services/line.service.js";
@@ -35,6 +38,11 @@ import {
   upsertFavorite,
   clearActiveFavorite,
   clampRadiusMeters,
+  removeFavoriteByLabel,
+  setPendingFavoriteLabel,
+  consumePendingFavoriteLabel,
+  isFavoritePreset,
+  FAVORITE_PRESETS,
 } from "../src/services/prefs.service.js";
 
 type Event = webhook.Event;
@@ -82,6 +90,44 @@ async function getActiveCoords(
   return { lat: coordData.lat, lng: coordData.lng, label: "住家" };
 }
 
+async function replyEtaNow(
+  userId: string,
+  replyToken: string,
+  notice?: string
+): Promise<void> {
+  const coords = await getActiveCoords(userId);
+  if (!coords) {
+    await replyMessage(replyToken, [
+      withQuickReply(
+        buildTextMessage(
+          "還沒設定位置。\n請先點底部選單「📍 定位」，傳一次住家位置。"
+        )
+      ),
+    ]);
+    return;
+  }
+
+  const prefs = await getUserPrefs(userId);
+  const eta = await calculateEta(coords.lat, coords.lng, {
+    locateMode: prefs.locateMode,
+    radiusMeters: prefs.radiusMeters,
+  });
+  const prefixParts: string[] = [];
+  if (notice) prefixParts.push(notice);
+  if (coords.label !== "住家") {
+    prefixParts.push(`📍 現在查的是：${coords.label}`);
+  }
+  const prefix =
+    prefixParts.length > 0
+      ? buildTextMessage(prefixParts.join("\n"))
+      : null;
+  const messages = buildEtaMessages(eta);
+  await replyMessage(
+    replyToken,
+    attachQuickReplyToLast(prefix ? [prefix, ...messages] : messages)
+  );
+}
+
 async function handleLocationMessage(
   userId: string,
   replyToken: string,
@@ -90,6 +136,42 @@ async function handleLocationMessage(
   const { latitude, longitude, address } = msg;
   if (latitude == null || longitude == null) return;
 
+  // Senior add-place flow: save as named favorite WITHOUT overwriting home.
+  const pendingLabel = await consumePendingFavoriteLabel(userId);
+  if (pendingLabel) {
+    await upsertFavorite(userId, {
+      label: pendingLabel,
+      lat: latitude,
+      lng: longitude,
+      address: address ?? pendingLabel,
+    });
+
+    try {
+      const prefs = await getUserPrefs(userId);
+      const nearestRoute = await resolveNearestRoute(latitude, longitude, {
+        locateMode: prefs.locateMode,
+        radiusMeters: prefs.radiusMeters,
+      });
+      if (nearestRoute) {
+        await setUserRouteId(
+          userId,
+          nearestRoute.routeId,
+          nearestRoute.routeName
+        );
+      }
+    } catch (err) {
+      console.error("[Webhook] Favorite route bind failed:", err);
+    }
+
+    await replyEtaNow(
+      userId,
+      replyToken,
+      `✅ 已存好「${pendingLabel}」，並立刻幫您查車`
+    );
+    return;
+  }
+
+  // Default: treat as home location
   await upsertUserLocation(userId, latitude, longitude);
   await clearActiveFavorite(userId);
 
@@ -108,10 +190,7 @@ async function handleLocationMessage(
       const prevRoute = prevRouteRaw ? JSON.parse(prevRouteRaw) : null;
       if (prevRoute && prevRoute.routeId !== nearestRoute.routeId) {
         routeSwitchNotice =
-          `\n\n🔄 路線已切換\n` +
-          `原路線：${prevRoute.routeName}\n` +
-          `新路線：${nearestRoute.routeName}\n` +
-          `現在將追蹤新地址最近的垃圾車 🚛`;
+          `\n\n路線已換成：${nearestRoute.routeName}`;
       }
       await setUserRouteId(userId, nearestRoute.routeId, nearestRoute.routeName);
     }
@@ -120,7 +199,7 @@ async function handleLocationMessage(
   }
 
   await replyMessage(replyToken, [
-    buildLocationConfirmMessage(address ?? "未知地址", routeSwitchNotice),
+    buildLocationConfirmMessage(address ?? "這個位置", routeSwitchNotice),
   ]);
 }
 
@@ -242,60 +321,113 @@ async function handleTextMessage(
 
   const favSave = text.match(/^(?:收藏|最愛)\s+(.+)$/);
   if (favSave) {
-    const label = favSave[1].trim().slice(0, 20);
-    // Prefer true home coords for new favorites
-    const user = await getUserByLineId(userId);
-    if (!user?.home_lat || !user?.home_lng) {
-      await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage("請先點選單「定位」傳 GPS，再回覆「收藏 公司」。")
-        ),
-      ]);
-      return;
-    }
-    const prefs = await upsertFavorite(userId, {
-      label,
-      lat: user.home_lat,
-      lng: user.home_lng,
-      address: label,
-    });
+    // Legacy typed command → redirect to button flow (elderly-friendly)
     await replyMessage(replyToken, [
       withQuickReply(
-        buildTextMessage(
-          `⭐ 已收藏「${label}」並設為追蹤點（最多 3 個）\n` +
-            `目前最愛：${prefs.favorites.map((f) => f.label).join("、")}\n` +
-            `切換：切換 ${label}｜切換 住家｜最愛`
-        )
+        buildTextMessage("不用打字喔！請點選單「⭐ 最愛」，再用大按鈕操作。")
+      ),
+      buildFavoritesMenuFlex({
+        favorites: (await getUserPrefs(userId)).favorites,
+        activeLabel: "住家",
+      }),
+    ]);
+    return;
+  }
+
+  // ── Elderly one-tap favorites ──────────────────────────────
+  if (/^最愛$/.test(text)) {
+    const prefs = await getUserPrefs(userId);
+    const activeLabel = prefs.activeFavoriteId
+      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)?.label ??
+        "住家"
+      : "住家";
+    await replyMessage(replyToken, [
+      withQuickReply(
+        buildFavoritesMenuFlex({
+          favorites: prefs.favorites,
+          activeLabel,
+        })
       ),
     ]);
     return;
   }
 
-  if (/^最愛$/.test(text)) {
-    const prefs = await getUserPrefs(userId);
-    if (prefs.favorites.length === 0) {
+  if (/^新增地點$/.test(text)) {
+    await replyMessage(replyToken, [buildPickFavoriteNameFlex()]);
+    return;
+  }
+
+  const saveNameMatch = text.match(/^要存(.+)$/);
+  if (saveNameMatch) {
+    const label = saveNameMatch[1].trim();
+    if (!isFavoritePreset(label)) {
       await replyMessage(replyToken, [
         withQuickReply(
           buildTextMessage(
-            "尚未收藏地點。先點選單「定位」傳 GPS，再回覆「收藏 公司」（最多 3 個）。"
+            `請點大按鈕選名稱：${FAVORITE_PRESETS.join("、")}`
           )
         ),
+        buildPickFavoriteNameFlex(),
       ]);
       return;
     }
-    const active = prefs.activeFavoriteId
-      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)?.label
-      : "住家";
+    await setPendingFavoriteLabel(userId, label);
+    await replyMessage(replyToken, [buildAskSendLocationFlex(label)]);
+    return;
+  }
+
+  if (/^刪除地點$/.test(text)) {
+    const prefs = await getUserPrefs(userId);
+    if (prefs.favorites.length === 0) {
+      await replyMessage(replyToken, [
+        withQuickReply(buildTextMessage("目前沒有其他地方可以刪。")),
+      ]);
+      return;
+    }
     await replyMessage(replyToken, [
-      withQuickReply(
-        buildTextMessage(
-          `⭐ 我的最愛\n` +
-            prefs.favorites.map((f, i) => `${i + 1}. ${f.label}`).join("\n") +
-            `\n目前追蹤：${active ?? "住家"}\n` +
-            `指令：切換 公司｜切換 住家`
-        )
-      ),
+      buildDeleteFavoriteFlex(prefs.favorites),
     ]);
+    return;
+  }
+
+  const deleteMatch = text.match(/^刪除(.+)$/);
+  if (deleteMatch && deleteMatch[1].trim() !== "地點") {
+    const label = deleteMatch[1].trim();
+    await removeFavoriteByLabel(userId, label);
+    const prefs = await getUserPrefs(userId);
+    await replyMessage(replyToken, [
+      withQuickReply(buildTextMessage(`✅ 已刪除「${label}」`)),
+      buildFavoritesMenuFlex({
+        favorites: prefs.favorites,
+        activeLabel: "住家",
+      }),
+    ]);
+    return;
+  }
+
+  const usePlaceMatch = text.match(/^用(.+)$/);
+  if (usePlaceMatch) {
+    const label = usePlaceMatch[1].trim();
+    if (label === "住家" || label === "家") {
+      await clearActiveFavorite(userId);
+      await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
+      return;
+    }
+    const prefs = await getUserPrefs(userId);
+    const fav = prefs.favorites.find((f) => f.label === label);
+    if (!fav) {
+      await replyMessage(replyToken, [
+        withQuickReply(
+          buildTextMessage(
+            `還沒存「${label}」。\n請點「➕ 新增一個地方」，再傳位置。`
+          )
+        ),
+        buildPickFavoriteNameFlex(),
+      ]);
+      return;
+    }
+    await setUserPrefs(userId, { activeFavoriteId: fav.id });
+    await replyEtaNow(userId, replyToken, `✅ 已換成「${fav.label}」`);
     return;
   }
 
@@ -304,11 +436,7 @@ async function handleTextMessage(
     const label = switchMatch[1].trim();
     if (label === "住家" || label === "家") {
       await clearActiveFavorite(userId);
-      await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage("✅ 已切回住家位置追蹤。點選單「垃圾車」查看 ETA。")
-        ),
-      ]);
+      await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
       return;
     }
     const prefs = await getUserPrefs(userId);
@@ -316,19 +444,13 @@ async function handleTextMessage(
     if (!fav) {
       await replyMessage(replyToken, [
         withQuickReply(
-          buildTextMessage(`找不到最愛「${label}」。先點選單「最愛」查看清單。`)
+          buildTextMessage(`找不到「${label}」。請點選單「最愛」用大按鈕操作。`)
         ),
       ]);
       return;
     }
     await setUserPrefs(userId, { activeFavoriteId: fav.id });
-    await replyMessage(replyToken, [
-      withQuickReply(
-        buildTextMessage(
-          `✅ 已切換追蹤「${fav.label}」。點選單「垃圾車」或「班表」。`
-        )
-      ),
-    ]);
+    await replyEtaNow(userId, replyToken, `✅ 已換成「${fav.label}」`);
     return;
   }
 
@@ -350,7 +472,7 @@ async function handleTextMessage(
     if (!coords) {
       await replyMessage(replyToken, [
         withQuickReply(
-          buildTextMessage("請先點選單「定位」傳 GPS，或「搜尋」查路名班表。")
+          buildTextMessage("請先點選單「定位」傳住家位置。")
         ),
       ]);
       return;
@@ -372,34 +494,7 @@ async function handleTextMessage(
   }
 
   if (intent === "eta") {
-    const coords = await getActiveCoords(userId);
-    if (!coords) {
-      await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage(
-            "⚠️ 您還沒有設定位置！\n\n" +
-              "請點底部選單「📍 定位」，或點「+」→「位置」。\n" +
-              "也可先點「🔍 搜尋」查路名班表。"
-          )
-        ),
-      ]);
-      return;
-    }
-
-    const prefs = await getUserPrefs(userId);
-    const eta = await calculateEta(coords.lat, coords.lng, {
-      locateMode: prefs.locateMode,
-      radiusMeters: prefs.radiusMeters,
-    });
-    const prefix =
-      coords.label !== "住家"
-        ? buildTextMessage(`📍 目前追蹤最愛：${coords.label}`)
-        : null;
-    const messages = buildEtaMessages(eta);
-    await replyMessage(
-      replyToken,
-      attachQuickReplyToLast(prefix ? [prefix, ...messages] : messages)
-    );
+    await replyEtaNow(userId, replyToken);
     return;
   }
 

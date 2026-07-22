@@ -506,12 +506,11 @@ export function buildLocationConfirmMessage(
 ): TextMessage {
   return withQuickReply(
     buildTextMessage(
-      `📍 已記錄您的位置！\n` +
-        `📌 地址：${address}` +
+      `📍 已設成「住家」位置\n` +
+        `📌 ${address}` +
         (extraNotice ? `\n${extraNotice}` : "") +
-        `\n\n✅ 設定完成！點下方選單「垃圾車」查 ETA，或「班表」看整週。\n` +
-        `⭐ 收藏 公司｜切換 公司｜最愛\n` +
-        `📏 半徑 200｜⚙️ 模式 推薦｜整天｜🔔 通知 開／關`
+        `\n\n👉 接下來請點下面大按鈕「查垃圾車」\n` +
+        `若要存兒女家／醫院，請點選單「⭐ 最愛」`
     )
   ) as TextMessage;
 }
@@ -519,18 +518,273 @@ export function buildLocationConfirmMessage(
 export function buildWelcomeMessage(): TextMessage {
   return withQuickReply(
     buildTextMessage(
-      `👋 歡迎使用 EcoTrack（比官方清運網更快一層）\n\n` +
-        `底部選單 6 鍵：\n` +
-        `📍 定位｜🚛 垃圾車｜📅 班表\n` +
-        `⭐ 最愛｜🔍 搜尋｜📖 說明\n\n` +
-        `進階指令：\n` +
-        `• 查 中正路 → 關鍵字搜尋\n` +
-        `• 半徑 50~500｜模式 推薦／整天\n` +
-        `• 收藏 公司｜切換 公司\n` +
-        `• 通知 開／關 → 靠近推播\n\n` +
-        `📡 服務範圍：新竹市全市`
+      `👋 歡迎使用新竹垃圾車提醒\n\n` +
+        `只要點下面 6 個大按鈕就好：\n` +
+        `1️⃣ 定位 → 設定住家\n` +
+        `2️⃣ 垃圾車 → 看何時到\n` +
+        `3️⃣ 班表 → 看哪幾天有收\n` +
+        `4️⃣ 最愛 → 換成兒女家／醫院（不用打字）\n` +
+        `5️⃣ 搜尋 → 用路名找\n` +
+        `6️⃣ 說明 → 再看一次\n\n` +
+        `💡 長輩專用：全部用「點選」，不必打字。`
     )
   ) as TextMessage;
+}
+
+/**
+ * One-tap favorites menu for seniors (large buttons, no typing).
+ */
+export function buildFavoritesMenuFlex(options: {
+  favorites: Array<{ label: string }>;
+  activeLabel: string;
+}): FlexMessage {
+  const { favorites, activeLabel } = options;
+  const isHome = activeLabel === "住家";
+
+  const homeBtn = {
+    type: "button" as const,
+    style: (isHome ? "primary" : "secondary") as "primary" | "secondary",
+    color: isHome ? "#059669" : undefined,
+    height: "md" as const,
+    action: {
+      type: "message" as const,
+      label: isHome ? "🏠 住家（使用中）" : "🏠 住家",
+      text: "用住家",
+    },
+  };
+
+  const favBtns = favorites.map((f) => {
+    const active = f.label === activeLabel;
+    return {
+      type: "button" as const,
+      style: (active ? "primary" : "secondary") as "primary" | "secondary",
+      color: active ? "#059669" : undefined,
+      height: "md" as const,
+      action: {
+        type: "message" as const,
+        label: active ? `${f.label}（使用中）` : f.label,
+        text: `用${f.label}`,
+      },
+    };
+  });
+
+  return {
+    type: "flex",
+    altText: "要查哪裡的垃圾車？點一下就好",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: "要查哪裡的車？",
+            weight: "bold",
+            size: "xl",
+            color: "#111827",
+          },
+          {
+            type: "text",
+            text: "點一下就會換成那個地方，並立刻查車。不用打字。",
+            size: "md",
+            color: "#4b5563",
+            wrap: true,
+          },
+          { type: "separator", margin: "md" },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "md",
+            margin: "lg",
+            contents: [homeBtn, ...favBtns],
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            color: "#1d4ed8",
+            height: "md",
+            action: {
+              type: "message",
+              label: "➕ 新增一個地方",
+              text: "新增地點",
+            },
+          },
+          ...(favorites.length > 0
+            ? [
+                {
+                  type: "button" as const,
+                  style: "secondary" as const,
+                  height: "md" as const,
+                  action: {
+                    type: "message" as const,
+                    label: "🗑 刪除某個地方",
+                    text: "刪除地點",
+                  },
+                },
+              ]
+            : []),
+        ],
+      },
+    },
+  };
+}
+
+/** Step 1 of add-place: pick a preset name. */
+export function buildPickFavoriteNameFlex(): FlexMessage {
+  const labels = ["兒女家", "醫院", "公園", "市場"] as const;
+  return {
+    type: "flex",
+    altText: "這個地方叫什麼？請點選",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: "這個地方叫什麼？",
+            weight: "bold",
+            size: "xl",
+          },
+          {
+            type: "text",
+            text: "請點一個名稱（不用打字）",
+            size: "md",
+            color: "#4b5563",
+            wrap: true,
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "md",
+            margin: "lg",
+            contents: labels.map((label) => ({
+              type: "button" as const,
+              style: "primary" as const,
+              color: "#0f766e",
+              height: "md" as const,
+              action: {
+                type: "message" as const,
+                label,
+                text: `要存${label}`,
+              },
+            })),
+          },
+        ],
+      },
+    },
+  };
+}
+
+/** Step 2: ask senior to send GPS with a big URI button. */
+export function buildAskSendLocationFlex(label: string): FlexMessage {
+  return {
+    type: "flex",
+    altText: `請傳送「${label}」的位置`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: `接下來：傳送「${label}」位置`,
+            weight: "bold",
+            size: "xl",
+            wrap: true,
+          },
+          {
+            type: "text",
+            text: "請按下面綠色大按鈕，在地圖上選那個地方後傳送。",
+            size: "md",
+            color: "#4b5563",
+            wrap: true,
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            color: "#059669",
+            height: "md",
+            action: {
+              type: "uri",
+              label: "📍 按這裡傳送位置",
+              uri: "https://line.me/R/nv/location/",
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+/** Delete picker — large buttons per saved place. */
+export function buildDeleteFavoriteFlex(
+  favorites: Array<{ label: string }>
+): FlexMessage {
+  return {
+    type: "flex",
+    altText: "要刪哪一個地方？",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: "要刪哪一個？",
+            weight: "bold",
+            size: "xl",
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "md",
+            margin: "lg",
+            contents: favorites.map((f) => ({
+              type: "button" as const,
+              style: "primary" as const,
+              color: "#dc2626",
+              height: "md" as const,
+              action: {
+                type: "message" as const,
+                label: `刪除 ${f.label}`,
+                text: `刪除${f.label}`,
+              },
+            })),
+          },
+        ],
+      },
+    },
+  };
 }
 
 function formatAbsoluteTime(etaMinutes: number): string {

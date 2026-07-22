@@ -81,7 +81,7 @@ async function createRichMenuImage(): Promise<string> {
       col: 0,
       row: 1,
       title: "⭐ 最愛",
-      subtitle: "多點切換",
+      subtitle: "一鍵換地方",
       bg: "#fff7ed",
       fg: "#9a3412",
       subFg: "#c2410c",
