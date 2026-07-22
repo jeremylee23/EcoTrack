@@ -55,15 +55,15 @@ export const MAIN_QUICK_REPLIES: messagingApi.QuickReplyItem[] = [
   },
   {
     type: "action",
+    action: { type: "message", label: "📍 附近清運點", text: "附近清運點" },
+  },
+  {
+    type: "action",
     action: { type: "message", label: "📅 班表", text: "班表" },
   },
   {
     type: "action",
     action: { type: "message", label: "⭐ 最愛", text: "最愛" },
-  },
-  {
-    type: "action",
-    action: { type: "message", label: "🔍 搜尋", text: "搜尋" },
   },
   {
     type: "action",
@@ -523,8 +523,9 @@ export function buildWelcomeMessage(): TextMessage {
         `1️⃣ 定位 → 設住家\n` +
         `2️⃣ 垃圾車 → 看何時到\n` +
         `3️⃣ 班表 → 哪幾天有收\n` +
-        `4️⃣ 最愛 → 換地方查（一鍵）\n` +
-        `5️⃣ 搜尋／說明\n\n` +
+        `4️⃣ 最愛 → 換地方查\n` +
+        `5️⃣ 附近清運點 → 看 100m 內哪裡倒、幾點來\n` +
+        `6️⃣ 搜尋／說明\n\n` +
         `家人可幫忙：在「最愛」幫地方加暱稱（例如兒子家），\n` +
         `地址仍會保留，不怕搞混。`
     )
@@ -876,6 +877,147 @@ export function buildAskNicknameTextMessage(placeLabel: string): TextMessage {
       `對象：${placeLabel}\n\n` +
       `直接傳文字即可；不想加就傳「不用了」。`
   );
+}
+
+/** Nearby clean points within radius — recommend soonest / nearest usable. */
+export function buildNearbyStopsFlex(guide: {
+  radiusMeters: number;
+  recommendReason: string;
+  recommend: {
+    name: string;
+    distanceMeters: number;
+    scheduledTime: string | null;
+    statusLabel: string;
+    nextArrival?: string;
+  } | null;
+  stops: Array<{
+    name: string;
+    distanceMeters: number;
+    scheduledTime: string | null;
+    statusLabel: string;
+    nextArrival?: string;
+  }>;
+}): FlexMessage | TextMessage {
+  if (!guide.recommend || guide.stops.length === 0) {
+    return withQuickReply(
+      buildTextMessage(
+        `⚠️ 方圓 ${guide.radiusMeters}m 找不到清運點。\n可傳「半徑 200」加大範圍。`
+      )
+    ) as TextMessage;
+  }
+
+  const rec = guide.recommend;
+  const rows = guide.stops.slice(0, 6).map((s, i) => ({
+    type: "box" as const,
+    layout: "vertical" as const,
+    margin: "md" as const,
+    contents: [
+      {
+        type: "text" as const,
+        text: `${i + 1}. ${s.name}（${s.distanceMeters}m）`,
+        weight: "bold" as const,
+        size: "sm" as const,
+        wrap: true,
+      },
+      {
+        type: "text" as const,
+        text:
+          `表定 ${s.scheduledTime ?? "?"}｜${s.statusLabel}` +
+          (s.nextArrival ? `｜下次 ${s.nextArrival}` : ""),
+        size: "xs" as const,
+        color: "#6b7280",
+        wrap: true,
+      },
+    ],
+  }));
+
+  return {
+    type: "flex",
+    altText: `附近清運點建議：${rec.name}`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        paddingAll: "18px",
+        contents: [
+          {
+            type: "text",
+            text: `方圓 ${guide.radiusMeters}m 清運點`,
+            weight: "bold",
+            size: "xl",
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            margin: "lg",
+            paddingAll: "12px",
+            backgroundColor: "#ecfdf5",
+            cornerRadius: "md",
+            contents: [
+              {
+                type: "text",
+                text: "⭐ 建議你去",
+                size: "xs",
+                color: "#047857",
+              },
+              {
+                type: "text",
+                text: `${rec.name}（${rec.distanceMeters}m）`,
+                weight: "bold",
+                size: "md",
+                wrap: true,
+                margin: "sm",
+              },
+              {
+                type: "text",
+                text: guide.recommendReason,
+                size: "xs",
+                color: "#065f46",
+                wrap: true,
+              },
+              {
+                type: "text",
+                text:
+                  `表定 ${rec.scheduledTime ?? "?"}｜${rec.statusLabel}` +
+                  (rec.nextArrival ? `\n下次 ${rec.nextArrival}` : ""),
+                size: "sm",
+                color: "#374151",
+                wrap: true,
+                margin: "sm",
+              },
+            ],
+          },
+          {
+            type: "text",
+            text: "附近清單",
+            weight: "bold",
+            size: "md",
+            margin: "xl",
+          },
+          ...rows,
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            color: "#059669",
+            height: "md",
+            action: {
+              type: "message",
+              label: "🚛 查即時垃圾車",
+              text: "垃圾車",
+            },
+          },
+        ],
+      },
+    },
+  };
 }
 
 /** Delete picker */

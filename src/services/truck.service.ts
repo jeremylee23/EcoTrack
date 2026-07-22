@@ -34,6 +34,7 @@ import {
 } from "../utils/eta-policy.util.js";
 import { clampRadiusMeters, type LocateMode } from "./prefs.service.js";
 import { formatWeekSchedule } from "./schedule.service.js";
+import { recommendNearbyStop } from "../utils/nearby-stops.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -505,6 +506,185 @@ export async function getScheduleCardForLocation(
     recycleDays: candidate.point.recycleDay,
     historicalAvgTime: (historicalAvg ?? candidate.point.historyTime) || undefined,
   });
+}
+
+export interface NearbyStopGuideItem {
+  id: string;
+  name: string;
+  address: string;
+  distanceMeters: number;
+  scheduledTime: string | null;
+  minutesUntilScheduled: number | null;
+  status: "live" | "upcoming" | "passed" | "no_service";
+  statusLabel: string;
+  etaMinutes?: number;
+  nextArrival?: string;
+}
+
+export interface NearbyStopsGuide {
+  radiusMeters: number;
+  recommend: NearbyStopGuideItem | null;
+  recommendReason: string;
+  nearest: NearbyStopGuideItem | null;
+  soonest: NearbyStopGuideItem | null;
+  stops: NearbyStopGuideItem[];
+  message: string;
+}
+
+function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
+  const name = c.point.pointName || c.point.address || "清運點";
+  const address = c.point.address || name;
+  const etaMinutes = c.garbageEtaMinutes ?? c.recyclingEtaMinutes;
+  const hasToday = c.hasTodayGarbage || c.hasTodayRecycling;
+  const passed = isSchedulePastGrace(hasToday, c.minutesUntilScheduled);
+
+  let status: NearbyStopGuideItem["status"];
+  let statusLabel: string;
+  if (etaMinutes !== undefined) {
+    status = "live";
+    statusLabel = `即時約 ${etaMinutes} 分`;
+  } else if (!hasToday) {
+    status = "no_service";
+    statusLabel = "今日無收運";
+  } else if (passed) {
+    status = "passed";
+    statusLabel = "今日已過站";
+  } else if (c.minutesUntilScheduled !== null && c.minutesUntilScheduled < 0) {
+    status = "upcoming";
+    statusLabel = `表定已過 ${Math.abs(c.minutesUntilScheduled)} 分（可能延誤中）`;
+  } else if (c.minutesUntilScheduled !== null) {
+    status = "upcoming";
+    statusLabel = `約 ${c.minutesUntilScheduled} 分後（表定）`;
+  } else {
+    status = "upcoming";
+    statusLabel = "今日有班（時間未知）";
+  }
+
+  const nextInfo = getNextScheduledArrival(
+    c.point.trashDay,
+    c.scheduledTime,
+    status === "passed" || status === "no_service",
+    [...DEFAULT_GARBAGE_DAYS]
+  );
+
+  return {
+    id: `${c.point.routeId}:${c.point.seq}:${c.point.pointId || name}`,
+    name,
+    address,
+    distanceMeters: Math.round(c.distanceMeters),
+    scheduledTime: c.scheduledTime,
+    minutesUntilScheduled: c.minutesUntilScheduled,
+    status,
+    statusLabel,
+    etaMinutes,
+    nextArrival: nextInfo?.dateStr,
+  };
+}
+
+/**
+ * List clean points near a target (default 100m) with times, and recommend:
+ * nearest usable / soonest / fallback when nearest already passed.
+ */
+export async function getNearbyStopsGuide(
+  userLat: number,
+  userLng: number,
+  options: CalculateEtaOptions = {}
+): Promise<NearbyStopsGuide> {
+  const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
+  const candidates = await selectNearbyCandidates(userLat, userLng, {
+    ...options,
+    // Listing works best with all_day so we see every stop in range, then rank ourselves.
+    locateMode: options.locateMode ?? "all_day",
+    radiusMeters,
+  });
+
+  const inRange = candidates
+    .filter((c) => c.distanceMeters <= radiusMeters)
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  // If nothing in preferred radius, fall back to closest few from expanded search.
+  const pool = (inRange.length > 0 ? inRange : candidates.slice(0, 5)).slice(
+    0,
+    8
+  );
+  const stops = pool.map(candidateToGuideItem);
+
+  if (stops.length === 0) {
+    return {
+      radiusMeters,
+      recommend: null,
+      recommendReason: "",
+      nearest: null,
+      soonest: null,
+      stops: [],
+      message:
+        `⚠️ 方圓 ${radiusMeters}m 找不到清運點。\n` +
+        `可傳「半徑 200」加大範圍，或「查 路名」搜尋。`,
+    };
+  }
+
+  const pick = recommendNearbyStop(
+    stops.map((s) => ({
+      id: s.id,
+      distanceMeters: s.distanceMeters,
+      etaMinutes: s.etaMinutes,
+      minutesUntilScheduled: s.minutesUntilScheduled,
+      hasTodayService: s.status !== "no_service",
+      status: s.status,
+    }))
+  );
+
+  const recommend =
+    (pick && stops.find((s) => s.id === pick.stop.id)) || stops[0];
+  const recommendReason = pick?.reason ?? "最近清運點";
+
+  const nearest = [...stops].sort(
+    (a, b) => a.distanceMeters - b.distanceMeters
+  )[0];
+  const soonestUseful = [...stops]
+    .filter((s) => s.status === "live" || s.status === "upcoming")
+    .sort((a, b) => {
+      const ak = a.etaMinutes ?? Number.POSITIVE_INFINITY;
+      const bk = b.etaMinutes ?? Number.POSITIVE_INFINITY;
+      if (ak !== bk) return ak - bk;
+      return a.distanceMeters - b.distanceMeters;
+    })[0] ?? null;
+
+  const lines = [
+    `📍 方圓 ${radiusMeters}m 清運點（共 ${stops.length} 處）`,
+    ``,
+    `⭐ 建議：${recommend.name}（${recommend.distanceMeters}m）`,
+    `   ${recommendReason}`,
+    `   表定 ${recommend.scheduledTime ?? "未知"}｜${recommend.statusLabel}`,
+    recommend.nextArrival ? `   下次：${recommend.nextArrival}` : null,
+    ``,
+    `清單：`,
+    ...stops.map((s, i) => {
+      const mark = s.id === recommend.id ? "👉" : `${i + 1}.`;
+      return (
+        `${mark} ${s.name}｜${s.distanceMeters}m\n` +
+        `   表定 ${s.scheduledTime ?? "?"}｜${s.statusLabel}` +
+        (s.nextArrival && s.status !== "live" && s.status !== "upcoming"
+          ? `\n   下次 ${s.nextArrival}`
+          : "")
+      );
+    }),
+    ``,
+    nearest && soonestUseful && nearest.id !== soonestUseful.id
+      ? `📌 最近：${nearest.name}（${nearest.distanceMeters}m）｜最快：${soonestUseful.name}（${soonestUseful.distanceMeters}m）`
+      : null,
+    `💡 點「垃圾車」可追即時位置；傳「半徑 200」可加大範圍。`,
+  ].filter((line): line is string => line !== null);
+
+  return {
+    radiusMeters,
+    recommend,
+    recommendReason,
+    nearest,
+    soonest: soonestUseful,
+    stops,
+    message: lines.join("\n"),
+  };
 }
 
 function getTruckAgeMs(truck: TruckLiveData): number {

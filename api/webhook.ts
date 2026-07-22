@@ -17,6 +17,7 @@ import {
   resolveNearestRoute,
   searchCleanPointsByKeyword,
   getScheduleCardForLocation,
+  getNearbyStopsGuide,
 } from "../src/services/truck.service.js";
 import {
   replyMessage,
@@ -30,6 +31,7 @@ import {
   buildSavedPlaceFlex,
   buildPickNicknameTargetFlex,
   buildAskNicknameTextMessage,
+  buildNearbyStopsFlex,
   withQuickReply,
   attachQuickReplyToLast,
 } from "../src/services/line.service.js";
@@ -370,7 +372,7 @@ async function handleTextMessage(
     }
     // Don't steal real commands
     if (
-      !/^(說明|幫助|搜尋|設定|最愛|新增地點|加暱稱|刪除地點|垃圾車|班表)/.test(
+      !/^(說明|幫助|搜尋|設定|最愛|新增地點|加暱稱|刪除地點|垃圾車|班表|附近|附近清運點|清運點)/.test(
         text
       ) &&
       !text.startsWith("用") &&
@@ -607,6 +609,33 @@ async function handleTextMessage(
       coords?.lng
     );
     await replyMessage(replyToken, [withQuickReply(buildTextMessage(result))]);
+    return;
+  }
+
+  if (/^(附近清運點|附近|清運點|哪裡倒|去哪倒)$/.test(text)) {
+    const coords = await getActiveCoords(userId);
+    if (!coords) {
+      await replyMessage(replyToken, [
+        withQuickReply(
+          buildTextMessage("請先點選單「定位」設位置，再查附近清運點。")
+        ),
+      ]);
+      return;
+    }
+    const prefs = await getUserPrefs(userId);
+    const guide = await getNearbyStopsGuide(coords.lat, coords.lng, {
+      radiusMeters: prefs.radiusMeters,
+      locateMode: "all_day",
+    });
+    const header =
+      coords.label !== "住家"
+        ? buildTextMessage(`📍 以「${coords.label}」為中心`)
+        : null;
+    const card = withQuickReply(buildNearbyStopsFlex(guide));
+    await replyMessage(
+      replyToken,
+      header ? [header, card] : [card]
+    );
     return;
   }
 
