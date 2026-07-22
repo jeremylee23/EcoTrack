@@ -509,8 +509,8 @@ export function buildLocationConfirmMessage(
       `📍 已設成「住家」位置\n` +
         `📌 ${address}` +
         (extraNotice ? `\n${extraNotice}` : "") +
-        `\n\n👉 接下來請點下面大按鈕「查垃圾車」\n` +
-        `若要存兒女家／醫院，請點選單「⭐ 最愛」`
+        `\n\n👉 接下來請點下面「🚛 垃圾車」\n` +
+        `若還要存其他地方：點選單「⭐ 最愛」→「新增地方」`
     )
   ) as TextMessage;
 }
@@ -519,27 +519,33 @@ export function buildWelcomeMessage(): TextMessage {
   return withQuickReply(
     buildTextMessage(
       `👋 歡迎使用新竹垃圾車提醒\n\n` +
-        `只要點下面 6 個大按鈕就好：\n` +
-        `1️⃣ 定位 → 設定住家\n` +
+        `長輩只要點大按鈕：\n` +
+        `1️⃣ 定位 → 設住家\n` +
         `2️⃣ 垃圾車 → 看何時到\n` +
-        `3️⃣ 班表 → 看哪幾天有收\n` +
-        `4️⃣ 最愛 → 換成兒女家／醫院（不用打字）\n` +
-        `5️⃣ 搜尋 → 用路名找\n` +
-        `6️⃣ 說明 → 再看一次\n\n` +
-        `💡 長輩專用：全部用「點選」，不必打字。`
+        `3️⃣ 班表 → 哪幾天有收\n` +
+        `4️⃣ 最愛 → 換地方查（一鍵）\n` +
+        `5️⃣ 搜尋／說明\n\n` +
+        `家人可幫忙：在「最愛」幫地方加暱稱（例如兒子家），\n` +
+        `地址仍會保留，不怕搞混。`
     )
   ) as TextMessage;
 }
 
 /**
- * One-tap favorites menu for seniors (large buttons, no typing).
+ * One-tap favorites: address-based places + optional nickname.
  */
 export function buildFavoritesMenuFlex(options: {
-  favorites: Array<{ label: string }>;
+  favorites: Array<{
+    id: string;
+    label: string;
+    nickname?: string;
+    address?: string;
+  }>;
   activeLabel: string;
+  activeId?: string | null;
 }): FlexMessage {
-  const { favorites, activeLabel } = options;
-  const isHome = activeLabel === "住家";
+  const { favorites, activeId } = options;
+  const isHome = !activeId;
 
   const homeBtn = {
     type: "button" as const,
@@ -554,7 +560,10 @@ export function buildFavoritesMenuFlex(options: {
   };
 
   const favBtns = favorites.map((f) => {
-    const active = f.label === activeLabel;
+    const active = f.id === activeId;
+    const name = f.nickname?.trim() || f.label;
+    // LINE button label max ~40; keep short
+    const btnLabel = active ? `${name}（使用中）` : name;
     return {
       type: "button" as const,
       style: (active ? "primary" : "secondary") as "primary" | "secondary",
@@ -562,11 +571,30 @@ export function buildFavoritesMenuFlex(options: {
       height: "md" as const,
       action: {
         type: "message" as const,
-        label: active ? `${f.label}（使用中）` : f.label,
-        text: `用${f.label}`,
+        label: btnLabel.slice(0, 36),
+        text: `用地點:${f.id}`,
       },
     };
   });
+
+  const nickHint =
+    favorites.length > 0
+      ? {
+          type: "text" as const,
+          text: "有暱稱會顯示暱稱；沒有就顯示地址。地址一直都在。",
+          size: "sm" as const,
+          color: "#6b7280",
+          wrap: true,
+          margin: "md" as const,
+        }
+      : {
+          type: "text" as const,
+          text: "還沒其他地方。點下面「新增地方」，傳一次位置即可。",
+          size: "sm" as const,
+          color: "#6b7280",
+          wrap: true,
+          margin: "md" as const,
+        };
 
   return {
     type: "flex",
@@ -589,11 +617,12 @@ export function buildFavoritesMenuFlex(options: {
           },
           {
             type: "text",
-            text: "點一下就會換成那個地方，並立刻查車。不用打字。",
+            text: "點一下就換成那個地方，並立刻查車。",
             size: "md",
             color: "#4b5563",
             wrap: true,
           },
+          nickHint,
           { type: "separator", margin: "md" },
           {
             type: "box",
@@ -616,7 +645,7 @@ export function buildFavoritesMenuFlex(options: {
             height: "md",
             action: {
               type: "message",
-              label: "➕ 新增一個地方",
+              label: "➕ 新增地方",
               text: "新增地點",
             },
           },
@@ -628,7 +657,17 @@ export function buildFavoritesMenuFlex(options: {
                   height: "md" as const,
                   action: {
                     type: "message" as const,
-                    label: "🗑 刪除某個地方",
+                    label: "✏️ 幫地方加暱稱",
+                    text: "加暱稱",
+                  },
+                },
+                {
+                  type: "button" as const,
+                  style: "secondary" as const,
+                  height: "md" as const,
+                  action: {
+                    type: "message" as const,
+                    label: "🗑 刪除地方",
                     text: "刪除地點",
                   },
                 },
@@ -640,62 +679,20 @@ export function buildFavoritesMenuFlex(options: {
   };
 }
 
-/** Step 1 of add-place: pick a preset name. */
-export function buildPickFavoriteNameFlex(): FlexMessage {
-  const labels = ["兒女家", "醫院", "公園", "市場"] as const;
-  return {
-    type: "flex",
-    altText: "這個地方叫什麼？請點選",
-    contents: {
-      type: "bubble",
-      size: "mega",
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        paddingAll: "20px",
-        contents: [
-          {
-            type: "text",
-            text: "這個地方叫什麼？",
-            weight: "bold",
-            size: "xl",
-          },
-          {
-            type: "text",
-            text: "請點一個名稱（不用打字）",
-            size: "md",
-            color: "#4b5563",
-            wrap: true,
-          },
-          {
-            type: "box",
-            layout: "vertical",
-            spacing: "md",
-            margin: "lg",
-            contents: labels.map((label) => ({
-              type: "button" as const,
-              style: "primary" as const,
-              color: "#0f766e",
-              height: "md" as const,
-              action: {
-                type: "message" as const,
-                label,
-                text: `要存${label}`,
-              },
-            })),
-          },
-        ],
-      },
-    },
-  };
-}
+/** Ask to send GPS — no name picking. */
+export function buildAskSendLocationFlex(
+  purpose: "add" | "home" = "add"
+): FlexMessage {
+  const title =
+    purpose === "add" ? "新增一個地方" : "設定住家位置";
+  const body =
+    purpose === "add"
+      ? "請按下面綠色按鈕傳位置。\n系統會自動用地址記住，不用取名。"
+      : "請按下面綠色按鈕傳送住家位置。";
 
-/** Step 2: ask senior to send GPS with a big URI button. */
-export function buildAskSendLocationFlex(label: string): FlexMessage {
   return {
     type: "flex",
-    altText: `請傳送「${label}」的位置`,
+    altText: title,
     contents: {
       type: "bubble",
       size: "mega",
@@ -707,14 +704,14 @@ export function buildAskSendLocationFlex(label: string): FlexMessage {
         contents: [
           {
             type: "text",
-            text: `接下來：傳送「${label}」位置`,
+            text: title,
             weight: "bold",
             size: "xl",
             wrap: true,
           },
           {
             type: "text",
-            text: "請按下面綠色大按鈕，在地圖上選那個地方後傳送。",
+            text: body,
             size: "md",
             color: "#4b5563",
             wrap: true,
@@ -742,9 +739,148 @@ export function buildAskSendLocationFlex(label: string): FlexMessage {
   };
 }
 
-/** Delete picker — large buttons per saved place. */
+/** After save: optional nickname for family. */
+export function buildSavedPlaceFlex(options: {
+  displayName: string;
+  address?: string;
+  favoriteId: string;
+}): FlexMessage {
+  return {
+    type: "flex",
+    altText: `已存好 ${options.displayName}`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: "✅ 已存好這個地方",
+            weight: "bold",
+            size: "xl",
+          },
+          {
+            type: "text",
+            text: options.displayName,
+            size: "lg",
+            weight: "bold",
+            color: "#059669",
+            wrap: true,
+            margin: "md",
+          },
+          ...(options.address
+            ? [
+                {
+                  type: "text" as const,
+                  text: options.address,
+                  size: "sm" as const,
+                  color: "#6b7280",
+                  wrap: true,
+                },
+              ]
+            : []),
+          {
+            type: "text",
+            text: "長輩之後只要點「最愛」再點這裡即可。\n家人若要好記，可加暱稱（地址仍保留）。",
+            size: "sm",
+            color: "#4b5563",
+            wrap: true,
+            margin: "md",
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "secondary",
+            height: "md",
+            action: {
+              type: "message",
+              label: "✏️ 加暱稱（選填）",
+              text: `暱稱地點:${options.favoriteId}`,
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+/** Pick which place gets a nickname. */
+export function buildPickNicknameTargetFlex(
+  favorites: Array<{
+    id: string;
+    label: string;
+    nickname?: string;
+  }>
+): FlexMessage {
+  return {
+    type: "flex",
+    altText: "要幫哪個地方加暱稱？",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        paddingAll: "20px",
+        contents: [
+          {
+            type: "text",
+            text: "幫哪個地方加暱稱？",
+            weight: "bold",
+            size: "xl",
+          },
+          {
+            type: "text",
+            text: "暱稱像備註（兒子家），地址還在。",
+            size: "md",
+            color: "#4b5563",
+            wrap: true,
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "md",
+            margin: "lg",
+            contents: favorites.map((f) => ({
+              type: "button" as const,
+              style: "primary" as const,
+              color: "#0f766e",
+              height: "md" as const,
+              action: {
+                type: "message" as const,
+                label: (f.nickname || f.label).slice(0, 36),
+                text: `暱稱地點:${f.id}`,
+              },
+            })),
+          },
+        ],
+      },
+    },
+  };
+}
+
+export function buildAskNicknameTextMessage(placeLabel: string): TextMessage {
+  return buildTextMessage(
+    `請打上暱稱（家人可代打），例如：兒子家、診所\n` +
+      `對象：${placeLabel}\n\n` +
+      `直接傳文字即可；不想加就傳「不用了」。`
+  );
+}
+
+/** Delete picker */
 export function buildDeleteFavoriteFlex(
-  favorites: Array<{ label: string }>
+  favorites: Array<{ id: string; label: string; nickname?: string }>
 ): FlexMessage {
   return {
     type: "flex",
@@ -776,8 +912,8 @@ export function buildDeleteFavoriteFlex(
               height: "md" as const,
               action: {
                 type: "message" as const,
-                label: `刪除 ${f.label}`,
-                text: `刪除${f.label}`,
+                label: `刪除 ${f.nickname || f.label}`.slice(0, 36),
+                text: `刪地點:${f.id}`,
               },
             })),
           },

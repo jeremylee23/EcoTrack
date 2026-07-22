@@ -25,9 +25,11 @@ import {
   buildLocationConfirmMessage,
   buildWelcomeMessage,
   buildFavoritesMenuFlex,
-  buildPickFavoriteNameFlex,
   buildAskSendLocationFlex,
   buildDeleteFavoriteFlex,
+  buildSavedPlaceFlex,
+  buildPickNicknameTargetFlex,
+  buildAskNicknameTextMessage,
   withQuickReply,
   attachQuickReplyToLast,
 } from "../src/services/line.service.js";
@@ -38,11 +40,14 @@ import {
   upsertFavorite,
   clearActiveFavorite,
   clampRadiusMeters,
-  removeFavoriteByLabel,
-  setPendingFavoriteLabel,
-  consumePendingFavoriteLabel,
-  isFavoritePreset,
-  FAVORITE_PRESETS,
+  removeFavoriteById,
+  setPendingAddFavorite,
+  setPendingNickname,
+  consumePendingAction,
+  peekPendingAction,
+  setFavoriteNickname,
+  shortenAddress,
+  favoriteDisplayName,
 } from "../src/services/prefs.service.js";
 
 type Event = webhook.Event;
@@ -128,6 +133,25 @@ async function replyEtaNow(
   );
 }
 
+async function replyFavoritesMenu(
+  userId: string,
+  replyToken: string,
+  extra?: Parameters<typeof replyMessage>[1][number]
+): Promise<void> {
+  const prefs = await getUserPrefs(userId);
+  const active = prefs.activeFavoriteId
+    ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)
+    : null;
+  const menu = withQuickReply(
+    buildFavoritesMenuFlex({
+      favorites: prefs.favorites,
+      activeLabel: active ? favoriteDisplayName(active) : "住家",
+      activeId: prefs.activeFavoriteId,
+    })
+  );
+  await replyMessage(replyToken, extra ? [extra, menu] : [menu]);
+}
+
 async function handleLocationMessage(
   userId: string,
   replyToken: string,
@@ -136,21 +160,23 @@ async function handleLocationMessage(
   const { latitude, longitude, address } = msg;
   if (latitude == null || longitude == null) return;
 
-  // Senior add-place flow: save as named favorite WITHOUT overwriting home.
-  const pendingLabel = await consumePendingFavoriteLabel(userId);
-  if (pendingLabel) {
-    await upsertFavorite(userId, {
-      label: pendingLabel,
+  // Add-place flow: save by address, do NOT overwrite home.
+  const pending = await consumePendingAction(userId);
+  if (pending?.type === "add") {
+    const fullAddress = address?.trim() || "地圖上的位置";
+    const label = shortenAddress(fullAddress);
+    const prefsAfter = await upsertFavorite(userId, {
+      label,
       lat: latitude,
       lng: longitude,
-      address: address ?? pendingLabel,
+      address: fullAddress,
     });
+    const saved = prefsAfter.favorites[0];
 
     try {
-      const prefs = await getUserPrefs(userId);
       const nearestRoute = await resolveNearestRoute(latitude, longitude, {
-        locateMode: prefs.locateMode,
-        radiusMeters: prefs.radiusMeters,
+        locateMode: prefsAfter.locateMode,
+        radiusMeters: prefsAfter.radiusMeters,
       });
       if (nearestRoute) {
         await setUserRouteId(
@@ -163,11 +189,23 @@ async function handleLocationMessage(
       console.error("[Webhook] Favorite route bind failed:", err);
     }
 
-    await replyEtaNow(
-      userId,
-      replyToken,
-      `✅ 已存好「${pendingLabel}」，並立刻幫您查車`
-    );
+    const coords = await getActiveCoords(userId);
+    const eta = coords
+      ? await calculateEta(coords.lat, coords.lng, {
+          locateMode: prefsAfter.locateMode,
+          radiusMeters: prefsAfter.radiusMeters,
+        })
+      : null;
+
+    const messages = [
+      buildSavedPlaceFlex({
+        displayName: saved ? favoriteDisplayName(saved) : label,
+        address: fullAddress,
+        favoriteId: saved?.id ?? "",
+      }),
+      ...(eta ? buildEtaMessages(eta) : []),
+    ];
+    await replyMessage(replyToken, attachQuickReplyToLast(messages));
     return;
   }
 
@@ -189,8 +227,7 @@ async function handleLocationMessage(
     if (nearestRoute) {
       const prevRoute = prevRouteRaw ? JSON.parse(prevRouteRaw) : null;
       if (prevRoute && prevRoute.routeId !== nearestRoute.routeId) {
-        routeSwitchNotice =
-          `\n\n路線已換成：${nearestRoute.routeName}`;
+        routeSwitchNotice = `\n\n路線已換成：${nearestRoute.routeName}`;
       }
       await setUserRouteId(userId, nearestRoute.routeId, nearestRoute.routeName);
     }
@@ -319,60 +356,109 @@ async function handleTextMessage(
     return;
   }
 
+  // If family is typing a nickname, capture free text first.
+  const nicknamePending = await peekPendingAction(userId);
+  if (nicknamePending?.type === "nickname") {
+    if (/^(不用了|取消|算了)$/.test(text)) {
+      await consumePendingAction(userId);
+      await replyFavoritesMenu(
+        userId,
+        replyToken,
+        withQuickReply(buildTextMessage("好，不加暱稱也可以。"))
+      );
+      return;
+    }
+    // Don't steal real commands
+    if (
+      !/^(說明|幫助|搜尋|設定|最愛|新增地點|加暱稱|刪除地點|垃圾車|班表)/.test(
+        text
+      ) &&
+      !text.startsWith("用") &&
+      !text.startsWith("查 ") &&
+      !text.includes(":")
+    ) {
+      await consumePendingAction(userId);
+      const updated = await setFavoriteNickname(
+        userId,
+        nicknamePending.favoriteId,
+        text
+      );
+      if (!updated) {
+        await replyMessage(replyToken, [
+          withQuickReply(buildTextMessage("找不到這個地方，請再從「最愛」操作一次。")),
+        ]);
+        return;
+      }
+      const spot = updated.favorites.find(
+        (f) => f.id === nicknamePending.favoriteId
+      );
+      await replyFavoritesMenu(
+        userId,
+        replyToken,
+        withQuickReply(
+          buildTextMessage(
+            `✅ 已加上暱稱「${text.trim().slice(0, 12)}」\n` +
+              `地址仍是：${spot?.address || spot?.label || ""}`
+          )
+        )
+      );
+      return;
+    }
+  }
+
   const favSave = text.match(/^(?:收藏|最愛)\s+(.+)$/);
   if (favSave) {
-    // Legacy typed command → redirect to button flow (elderly-friendly)
-    await replyMessage(replyToken, [
+    await replyFavoritesMenu(
+      userId,
+      replyToken,
       withQuickReply(
-        buildTextMessage("不用打字喔！請點選單「⭐ 最愛」，再用大按鈕操作。")
-      ),
-      buildFavoritesMenuFlex({
-        favorites: (await getUserPrefs(userId)).favorites,
-        activeLabel: "住家",
-      }),
-    ]);
+        buildTextMessage("不用這樣打字。請用下面大按鈕操作即可。")
+      )
+    );
     return;
   }
 
-  // ── Elderly one-tap favorites ──────────────────────────────
+  // ── Favorites (address + optional nickname) ────────────────
   if (/^最愛$/.test(text)) {
-    const prefs = await getUserPrefs(userId);
-    const activeLabel = prefs.activeFavoriteId
-      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)?.label ??
-        "住家"
-      : "住家";
-    await replyMessage(replyToken, [
-      withQuickReply(
-        buildFavoritesMenuFlex({
-          favorites: prefs.favorites,
-          activeLabel,
-        })
-      ),
-    ]);
+    await replyFavoritesMenu(userId, replyToken);
     return;
   }
 
   if (/^新增地點$/.test(text)) {
-    await replyMessage(replyToken, [buildPickFavoriteNameFlex()]);
+    await setPendingAddFavorite(userId);
+    await replyMessage(replyToken, [buildAskSendLocationFlex("add")]);
     return;
   }
 
-  const saveNameMatch = text.match(/^要存(.+)$/);
-  if (saveNameMatch) {
-    const label = saveNameMatch[1].trim();
-    if (!isFavoritePreset(label)) {
+  if (/^加暱稱$/.test(text)) {
+    const prefs = await getUserPrefs(userId);
+    if (prefs.favorites.length === 0) {
       await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage(
-            `請點大按鈕選名稱：${FAVORITE_PRESETS.join("、")}`
-          )
-        ),
-        buildPickFavoriteNameFlex(),
+        withQuickReply(buildTextMessage("還沒有其他地方。請先「新增地方」。")),
       ]);
       return;
     }
-    await setPendingFavoriteLabel(userId, label);
-    await replyMessage(replyToken, [buildAskSendLocationFlex(label)]);
+    await replyMessage(replyToken, [
+      buildPickNicknameTargetFlex(prefs.favorites),
+    ]);
+    return;
+  }
+
+  const nickTarget = text.match(/^暱稱地點:(.+)$/);
+  if (nickTarget) {
+    const favoriteId = nickTarget[1].trim();
+    const prefs = await getUserPrefs(userId);
+    const spot = prefs.favorites.find((f) => f.id === favoriteId);
+    if (!spot) {
+      await replyMessage(replyToken, [
+        withQuickReply(buildTextMessage("找不到這個地方，請再試一次。")),
+      ]);
+      return;
+    }
+    await setPendingNickname(userId, favoriteId);
+    await replyMessage(replyToken, [
+      buildAskNicknameTextMessage(favoriteDisplayName(spot)),
+    ]);
     return;
   }
 
@@ -390,18 +476,62 @@ async function handleTextMessage(
     return;
   }
 
+  const deleteById = text.match(/^刪地點:(.+)$/);
+  if (deleteById) {
+    await removeFavoriteById(userId, deleteById[1].trim());
+    await replyFavoritesMenu(
+      userId,
+      replyToken,
+      withQuickReply(buildTextMessage("✅ 已刪除"))
+    );
+    return;
+  }
+
+  // Legacy delete by display name
   const deleteMatch = text.match(/^刪除(.+)$/);
   if (deleteMatch && deleteMatch[1].trim() !== "地點") {
     const label = deleteMatch[1].trim();
-    await removeFavoriteByLabel(userId, label);
     const prefs = await getUserPrefs(userId);
-    await replyMessage(replyToken, [
-      withQuickReply(buildTextMessage(`✅ 已刪除「${label}」`)),
-      buildFavoritesMenuFlex({
-        favorites: prefs.favorites,
-        activeLabel: "住家",
-      }),
-    ]);
+    const spot = prefs.favorites.find(
+      (f) =>
+        f.label === label ||
+        f.nickname === label ||
+        favoriteDisplayName(f) === label
+    );
+    if (spot) await removeFavoriteById(userId, spot.id);
+    await replyFavoritesMenu(
+      userId,
+      replyToken,
+      withQuickReply(buildTextMessage(`✅ 已刪除「${label}」`))
+    );
+    return;
+  }
+
+  if (/^用住家$/.test(text) || /^用家$/.test(text)) {
+    await clearActiveFavorite(userId);
+    await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
+    return;
+  }
+
+  const useById = text.match(/^用地點:(.+)$/);
+  if (useById) {
+    const favId = useById[1].trim();
+    const prefs = await getUserPrefs(userId);
+    const fav = prefs.favorites.find((f) => f.id === favId);
+    if (!fav) {
+      await replyFavoritesMenu(
+        userId,
+        replyToken,
+        withQuickReply(buildTextMessage("找不到這個地方，請重新選一次。"))
+      );
+      return;
+    }
+    await setUserPrefs(userId, { activeFavoriteId: fav.id });
+    await replyEtaNow(
+      userId,
+      replyToken,
+      `✅ 已換成「${favoriteDisplayName(fav)}」`
+    );
     return;
   }
 
@@ -414,20 +544,28 @@ async function handleTextMessage(
       return;
     }
     const prefs = await getUserPrefs(userId);
-    const fav = prefs.favorites.find((f) => f.label === label);
+    const fav = prefs.favorites.find(
+      (f) =>
+        f.label === label ||
+        f.nickname === label ||
+        favoriteDisplayName(f) === label
+    );
     if (!fav) {
-      await replyMessage(replyToken, [
+      await replyFavoritesMenu(
+        userId,
+        replyToken,
         withQuickReply(
-          buildTextMessage(
-            `還沒存「${label}」。\n請點「➕ 新增一個地方」，再傳位置。`
-          )
-        ),
-        buildPickFavoriteNameFlex(),
-      ]);
+          buildTextMessage(`還沒有「${label}」。請先「新增地方」傳位置。`)
+        )
+      );
       return;
     }
     await setUserPrefs(userId, { activeFavoriteId: fav.id });
-    await replyEtaNow(userId, replyToken, `✅ 已換成「${fav.label}」`);
+    await replyEtaNow(
+      userId,
+      replyToken,
+      `✅ 已換成「${favoriteDisplayName(fav)}」`
+    );
     return;
   }
 
@@ -440,17 +578,22 @@ async function handleTextMessage(
       return;
     }
     const prefs = await getUserPrefs(userId);
-    const fav = prefs.favorites.find((f) => f.label === label);
+    const fav = prefs.favorites.find(
+      (f) =>
+        f.label === label ||
+        f.nickname === label ||
+        favoriteDisplayName(f) === label
+    );
     if (!fav) {
-      await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage(`找不到「${label}」。請點選單「最愛」用大按鈕操作。`)
-        ),
-      ]);
+      await replyFavoritesMenu(userId, replyToken);
       return;
     }
     await setUserPrefs(userId, { activeFavoriteId: fav.id });
-    await replyEtaNow(userId, replyToken, `✅ 已換成「${fav.label}」`);
+    await replyEtaNow(
+      userId,
+      replyToken,
+      `✅ 已換成「${favoriteDisplayName(fav)}」`
+    );
     return;
   }
 
@@ -471,9 +614,7 @@ async function handleTextMessage(
     const coords = await getActiveCoords(userId);
     if (!coords) {
       await replyMessage(replyToken, [
-        withQuickReply(
-          buildTextMessage("請先點選單「定位」傳住家位置。")
-        ),
+        withQuickReply(buildTextMessage("請先點選單「定位」傳住家位置。")),
       ]);
       return;
     }
