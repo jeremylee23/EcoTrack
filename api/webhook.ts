@@ -51,6 +51,7 @@ import {
   shortenAddress,
   favoriteDisplayName,
 } from "../src/services/prefs.service.js";
+import { isSamePlace } from "../src/utils/place-sync.util.js";
 
 type Event = webhook.Event;
 type MessageEvent = webhook.MessageEvent;
@@ -76,22 +77,9 @@ function validateLineSignature(
   return crypto.timingSafeEqual(hmacBuffer, sigBuffer);
 }
 
-async function getActiveCoords(
+async function fetchHomeCoords(
   userId: string
-): Promise<{ lat: number; lng: number; label: string; address?: string } | null> {
-  const prefs = await getUserPrefs(userId);
-  if (prefs.activeFavoriteId) {
-    const fav = prefs.favorites.find((f) => f.id === prefs.activeFavoriteId);
-    if (fav) {
-      return {
-        lat: fav.lat,
-        lng: fav.lng,
-        label: favoriteDisplayName(fav),
-        address: fav.address || fav.label,
-      };
-    }
-  }
-
+): Promise<{ lat: number; lng: number } | null> {
   const { createClient } = await import("@supabase/supabase-js");
   const db = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
     auth: { persistSession: false },
@@ -101,9 +89,53 @@ async function getActiveCoords(
   });
   const coordData = coords as { lat: number; lng: number } | null;
   if (!coordData?.lat) return null;
+  return { lat: coordData.lat, lng: coordData.lng };
+}
+
+/**
+ * Active query point. If the selected favorite is the same place as「定位」,
+ * reuse home GPS + doorplate so clean-point suggestions stay identical.
+ */
+async function getActiveCoords(
+  userId: string
+): Promise<{ lat: number; lng: number; label: string; address?: string } | null> {
+  const prefs = await getUserPrefs(userId);
+  const home = await fetchHomeCoords(userId);
+
+  if (prefs.activeFavoriteId) {
+    const fav = prefs.favorites.find((f) => f.id === prefs.activeFavoriteId);
+    if (fav) {
+      if (
+        home &&
+        isSamePlace({
+          homeLat: home.lat,
+          homeLng: home.lng,
+          homeAddress: prefs.homeAddress,
+          spotLat: fav.lat,
+          spotLng: fav.lng,
+          spotAddress: fav.address || fav.label,
+        })
+      ) {
+        return {
+          lat: home.lat,
+          lng: home.lng,
+          label: favoriteDisplayName(fav),
+          address: prefs.homeAddress || fav.address || fav.label,
+        };
+      }
+      return {
+        lat: fav.lat,
+        lng: fav.lng,
+        label: favoriteDisplayName(fav),
+        address: fav.address || fav.label,
+      };
+    }
+  }
+
+  if (!home) return null;
   return {
-    lat: coordData.lat,
-    lng: coordData.lng,
+    lat: home.lat,
+    lng: home.lng,
     label: "定位存的地方",
     address: prefs.homeAddress,
   };
@@ -182,17 +214,40 @@ async function handleLocationMessage(
   const pending = await consumePendingAction(userId);
   if (pending?.type === "add") {
     const fullAddress = address?.trim() || "地圖上的位置";
-    const label = shortenAddress(fullAddress);
+    let saveLat = latitude;
+    let saveLng = longitude;
+    let saveAddress = fullAddress;
+
+    // Same place as「定位」→ snap to home GPS so later queries match.
+    const home = await fetchHomeCoords(userId);
+    const prefsBefore = await getUserPrefs(userId);
+    if (
+      home &&
+      isSamePlace({
+        homeLat: home.lat,
+        homeLng: home.lng,
+        homeAddress: prefsBefore.homeAddress,
+        spotLat: latitude,
+        spotLng: longitude,
+        spotAddress: fullAddress,
+      })
+    ) {
+      saveLat = home.lat;
+      saveLng = home.lng;
+      saveAddress = prefsBefore.homeAddress || fullAddress;
+    }
+
+    const label = shortenAddress(saveAddress);
     const prefsAfter = await upsertFavorite(userId, {
       label,
-      lat: latitude,
-      lng: longitude,
-      address: fullAddress,
+      lat: saveLat,
+      lng: saveLng,
+      address: saveAddress,
     });
     const saved = prefsAfter.favorites[0];
 
     try {
-      const nearestRoute = await resolveNearestRoute(latitude, longitude, {
+      const nearestRoute = await resolveNearestRoute(saveLat, saveLng, {
         locateMode: prefsAfter.locateMode,
         radiusMeters: prefsAfter.radiusMeters,
       });
@@ -212,16 +267,34 @@ async function handleLocationMessage(
       ? await calculateEta(coords.lat, coords.lng, {
           locateMode: prefsAfter.locateMode,
           radiusMeters: prefsAfter.radiusMeters,
-          homeAddress: coords.address || fullAddress,
+          homeAddress: coords.address || saveAddress,
         })
       : null;
+
+    const sameAsHome =
+      home &&
+      isSamePlace({
+        homeLat: home.lat,
+        homeLng: home.lng,
+        homeAddress: prefsBefore.homeAddress,
+        spotLat: saveLat,
+        spotLng: saveLng,
+        spotAddress: saveAddress,
+      });
 
     const messages = [
       buildSavedPlaceFlex({
         displayName: saved ? favoriteDisplayName(saved) : label,
-        address: fullAddress,
+        address: saveAddress,
         favoriteId: saved?.id ?? "",
       }),
+      ...(sameAsHome
+        ? [
+            buildTextMessage(
+              "ℹ️ 這個地方跟「定位存的地方」是同一處，查車會用同一組座標，清運點不會對不上。"
+            ),
+          ]
+        : []),
       ...(eta ? buildEtaMessages(eta) : []),
     ];
     await replyMessage(replyToken, attachQuickReplyToLast(messages));
@@ -232,7 +305,29 @@ async function handleLocationMessage(
   await upsertUserLocation(userId, latitude, longitude);
   await clearActiveFavorite(userId);
   const homeAddress = address?.trim() || "這個位置";
-  await setUserPrefs(userId, { homeAddress });
+  const prefsNow = await getUserPrefs(userId);
+  // Snap favorites that are the same doorplate/GPS onto this home pin.
+  const syncedFavorites = prefsNow.favorites.map((f) => {
+    if (
+      !isSamePlace({
+        homeLat: latitude,
+        homeLng: longitude,
+        homeAddress,
+        spotLat: f.lat,
+        spotLng: f.lng,
+        spotAddress: f.address || f.label,
+      })
+    ) {
+      return f;
+    }
+    return {
+      ...f,
+      lat: latitude,
+      lng: longitude,
+      address: homeAddress,
+    };
+  });
+  await setUserPrefs(userId, { homeAddress, favorites: syncedFavorites });
 
   let routeSwitchNotice = "";
   try {

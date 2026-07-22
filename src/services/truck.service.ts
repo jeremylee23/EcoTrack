@@ -292,10 +292,13 @@ async function fetchNearbyPointsCached(
   userLat: number,
   userLng: number,
   radiusMeters: number,
-  locateMode: LocateMode
+  _locateMode: LocateMode
 ): Promise<HccgCleanPoint[]> {
+  // Always fetch locatemode=0 (all in range). Ranking by「推薦／整天」is done in JS.
+  // Otherwise 定位 vs 最愛（或垃圾車 vs 附近）會因官方 API 回不同子集而建議不同清運點。
+  const fetchMode: LocateMode = "all_day";
   const redis = getRedis();
-  const cacheKey = POINTS_CACHE_KEY(userLat, userLng, radiusMeters, locateMode);
+  const cacheKey = POINTS_CACHE_KEY(userLat, userLng, radiusMeters, fetchMode);
 
   try {
     const cached = await redis.get<HccgCleanPoint[]>(cacheKey);
@@ -308,7 +311,7 @@ async function fetchNearbyPointsCached(
     userLat,
     userLng,
     buildSearchRadii(radiusMeters),
-    locateMode
+    fetchMode
   );
 
   if (points.length > 0) {
