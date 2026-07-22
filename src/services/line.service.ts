@@ -55,7 +55,7 @@ export const MAIN_QUICK_REPLIES: messagingApi.QuickReplyItem[] = [
   },
   {
     type: "action",
-    action: { type: "message", label: "📍 附近清運點", text: "附近清運點" },
+    action: { type: "message", label: "🗺️ 附近", text: "附近清運點" },
   },
   {
     type: "action",
@@ -551,8 +551,8 @@ export function buildWelcomeMessage(): TextMessage {
         `2️⃣ 垃圾車 → 看何時到\n` +
         `3️⃣ 班表 → 哪幾天有收\n` +
         `4️⃣ 最愛 → 換地方查\n` +
-        `5️⃣ 附近清運點 → 看 100m 內哪裡倒、幾點來\n` +
-        `6️⃣ 搜尋／說明\n\n` +
+        `5️⃣ 附近 → 看哪裡可倒（有圖有地圖）\n` +
+        `6️⃣ 說明\n\n` +
         `家人可幫忙：在「最愛」幫地方加暱稱（例如兒子家），\n` +
         `地址仍會保留，不怕搞混。`
     )
@@ -976,145 +976,362 @@ export function buildAskNicknameTextMessage(
   );
 }
 
-/** Nearby clean points within radius — recommend soonest / nearest usable. */
+/** Visual carousel of nearby clean points — easier for seniors than plain text. */
 export function buildNearbyStopsFlex(guide: {
   radiusMeters: number;
+  userLat: number;
+  userLng: number;
   recommendReason: string;
   recommend: {
+    id: string;
     name: string;
+    address: string;
+    lat: number;
+    lng: number;
     distanceMeters: number;
     scheduledTime: string | null;
+    status: "live" | "upcoming" | "passed" | "no_service";
     statusLabel: string;
+    etaMinutes?: number;
     nextArrival?: string;
   } | null;
   stops: Array<{
+    id: string;
     name: string;
+    address: string;
+    lat: number;
+    lng: number;
     distanceMeters: number;
     scheduledTime: string | null;
+    status: "live" | "upcoming" | "passed" | "no_service";
     statusLabel: string;
+    etaMinutes?: number;
     nextArrival?: string;
   }>;
-}): FlexMessage | TextMessage {
+}): Message {
   if (!guide.recommend || guide.stops.length === 0) {
     return withQuickReply(
       buildTextMessage(
         `⚠️ 方圓 ${guide.radiusMeters}m 找不到清運點。\n可傳「半徑 200」加大範圍。`
       )
-    ) as TextMessage;
+    );
   }
 
-  const rec = guide.recommend;
-  const rows = guide.stops.slice(0, 6).map((s, i) => ({
-    type: "box" as const,
-    layout: "vertical" as const,
-    margin: "md" as const,
-    contents: [
-      {
-        type: "text" as const,
-        text: `${i + 1}. ${s.name}（${s.distanceMeters}m）`,
-        weight: "bold" as const,
-        size: "sm" as const,
-        wrap: true,
-      },
-      {
-        type: "text" as const,
-        text:
-          `表定 ${s.scheduledTime ?? "?"}｜${s.statusLabel}` +
-          (s.nextArrival ? `｜下次 ${s.nextArrival}` : ""),
-        size: "xs" as const,
-        color: "#6b7280",
-        wrap: true,
-      },
-    ],
-  }));
+  const statusStyle = (
+    status: "live" | "upcoming" | "passed" | "no_service"
+  ): { bg: string; emoji: string; label: string } => {
+    switch (status) {
+      case "live":
+        return { bg: "#059669", emoji: "🟢", label: "車快到了" };
+      case "upcoming":
+        return { bg: "#2563eb", emoji: "🔵", label: "還能等" };
+      case "passed":
+        return { bg: "#9ca3af", emoji: "⚪", label: "已過站" };
+      default:
+        return { bg: "#dc2626", emoji: "🔴", label: "今日無班" };
+    }
+  };
 
-  return {
-    type: "flex",
-    altText: `附近清運點建議：${rec.name}`,
-    contents: {
-      type: "bubble",
-      size: "mega",
-      body: {
-        type: "box",
-        layout: "vertical",
-        paddingAll: "18px",
-        contents: [
-          {
-            type: "text",
-            text: `方圓 ${guide.radiusMeters}m 清運點`,
-            weight: "bold",
-            size: "xl",
-          },
-          {
-            type: "box",
-            layout: "vertical",
-            margin: "lg",
-            paddingAll: "12px",
-            backgroundColor: "#ecfdf5",
-            cornerRadius: "md",
-            contents: [
-              {
-                type: "text",
-                text: "⭐ 建議你去",
-                size: "xs",
-                color: "#047857",
-              },
-              {
-                type: "text",
-                text: `${rec.name}（${rec.distanceMeters}m）`,
-                weight: "bold",
-                size: "md",
-                wrap: true,
-                margin: "sm",
-              },
-              {
-                type: "text",
-                text: guide.recommendReason,
-                size: "xs",
-                color: "#065f46",
-                wrap: true,
-              },
-              {
-                type: "text",
-                text:
-                  `表定 ${rec.scheduledTime ?? "?"}｜${rec.statusLabel}` +
-                  (rec.nextArrival ? `\n下次 ${rec.nextArrival}` : ""),
-                size: "sm",
-                color: "#374151",
-                wrap: true,
-                margin: "sm",
-              },
-            ],
-          },
-          {
-            type: "text",
-            text: "附近清單",
-            weight: "bold",
-            size: "md",
-            margin: "xl",
-          },
-          ...rows,
-        ],
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "button",
-            style: "primary",
-            color: "#059669",
-            height: "md",
-            action: {
-              type: "message",
-              label: "🚛 查即時垃圾車",
-              text: "垃圾車",
-            },
-          },
-        ],
+  const buildMapUrl = (
+    focus?: { lat: number; lng: number; name: string }
+  ): string => {
+    const params = new URLSearchParams();
+    params.set("uLat", String(guide.userLat));
+    params.set("uLng", String(guide.userLng));
+    params.set("radius", String(guide.radiusMeters));
+    if (focus) {
+      params.set("sLat", String(focus.lat));
+      params.set("sLng", String(focus.lng));
+      params.set("stop", focus.name);
+    } else if (guide.recommend) {
+      params.set("sLat", String(guide.recommend.lat));
+      params.set("sLng", String(guide.recommend.lng));
+      params.set("stop", guide.recommend.name);
+    }
+    const near = guide.stops
+      .slice(0, 8)
+      .map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`)
+      .join("|");
+    if (near) params.set("near", near);
+    return `https://ecotrack-hsinchu.vercel.app/map?${params.toString()}`;
+  };
+
+  /** Preview map image for seniors — see the pin, not only words. */
+  const buildStaticMapImage = (lat: number, lng: number): string => {
+    const params = new URLSearchParams({
+      lat: lat.toFixed(6),
+      lng: lng.toFixed(6),
+      z: "16",
+    });
+    return `https://ecotrack-hsinchu.vercel.app/api/static-map?${params.toString()}`;
+  };
+
+  const overviewMap = buildMapUrl();
+  const rec = guide.recommend;
+  const recStyle = statusStyle(rec.status);
+
+  const recommendBubble: messagingApi.FlexBubble = {
+    type: "bubble",
+    size: "mega",
+    hero: {
+      type: "image",
+      url: buildStaticMapImage(rec.lat, rec.lng),
+      size: "full",
+      aspectRatio: "20:11",
+      aspectMode: "cover",
+      action: {
+        type: "uri",
+        label: "打開地圖",
+        uri: overviewMap,
       },
     },
+    header: {
+      type: "box",
+      layout: "vertical",
+      paddingAll: "16px",
+      backgroundColor: "#059669",
+      contents: [
+        {
+          type: "text",
+          text: "附近哪裡可以倒？",
+          weight: "bold",
+          size: "xl",
+          color: "#ffffff",
+          align: "center",
+        },
+        {
+          type: "text",
+          text: `方圓約 ${guide.radiusMeters} 公尺　點圖可開地圖`,
+          size: "sm",
+          color: "#d1fae5",
+          align: "center",
+          margin: "sm",
+        },
+      ],
+    },
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "md",
+      paddingAll: "16px",
+      contents: [
+        {
+          type: "box",
+          layout: "vertical",
+          paddingAll: "14px",
+          backgroundColor: "#ecfdf5",
+          cornerRadius: "lg",
+          contents: [
+            {
+              type: "text",
+              text: `${recStyle.emoji} 建議你去這裡`,
+              weight: "bold",
+              size: "lg",
+              color: "#047857",
+            },
+            {
+              type: "text",
+              text: rec.name,
+              weight: "bold",
+              size: "xl",
+              wrap: true,
+              margin: "md",
+            },
+            {
+              type: "text",
+              text: `走路約 ${rec.distanceMeters} 公尺`,
+              size: "lg",
+              color: "#374151",
+              margin: "md",
+            },
+            {
+              type: "text",
+              text: `時間 ${rec.scheduledTime ?? "未知"}`,
+              size: "lg",
+              color: "#374151",
+              margin: "sm",
+            },
+            {
+              type: "text",
+              text: rec.statusLabel,
+              size: "md",
+              color: "#065f46",
+              wrap: true,
+              margin: "sm",
+            },
+            {
+              type: "text",
+              text: guide.recommendReason,
+              size: "sm",
+              color: "#6b7280",
+              wrap: true,
+              margin: "md",
+            },
+          ],
+        },
+        {
+          type: "text",
+          text: "往右滑看其他點（顏色：綠可倒、藍還能等、灰已過）",
+          size: "sm",
+          color: "#6b7280",
+          align: "center",
+          margin: "md",
+          wrap: true,
+        },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      contents: [
+        {
+          type: "button",
+          style: "primary",
+          color: "#059669",
+          height: "md",
+          action: {
+            type: "uri",
+            label: "打開大地圖",
+            uri: overviewMap,
+          },
+        },
+        {
+          type: "button",
+          style: "secondary",
+          height: "md",
+          action: {
+            type: "message",
+            label: "查即時垃圾車",
+            text: "垃圾車",
+          },
+        },
+      ],
+    },
   };
+
+  const stopBubbles: messagingApi.FlexBubble[] = guide.stops
+    .slice(0, 5)
+    .map((s, i) => {
+      const style = statusStyle(s.status);
+      const isRec = s.id === rec.id;
+      const stopMap = buildMapUrl({ lat: s.lat, lng: s.lng, name: s.name });
+      return {
+        type: "bubble" as const,
+        size: "mega" as const,
+        hero: {
+          type: "image" as const,
+          url: buildStaticMapImage(s.lat, s.lng),
+          size: "full" as const,
+          aspectRatio: "20:11",
+          aspectMode: "cover" as const,
+          action: {
+            type: "uri" as const,
+            label: "打開地圖",
+            uri: stopMap,
+          },
+        },
+        header: {
+          type: "box" as const,
+          layout: "vertical" as const,
+          paddingAll: "16px",
+          backgroundColor: style.bg,
+          contents: [
+            {
+              type: "text" as const,
+              text: `${style.emoji} ${style.label}${isRec ? "　建議" : ""}`,
+              color: "#ffffff",
+              weight: "bold" as const,
+              size: "lg" as const,
+            },
+            {
+              type: "text" as const,
+              text: `第 ${i + 1} 個　距離 ${s.distanceMeters}m`,
+              color: "#ffffff",
+              size: "md" as const,
+              margin: "sm" as const,
+            },
+          ],
+        },
+        body: {
+          type: "box" as const,
+          layout: "vertical" as const,
+          spacing: "sm" as const,
+          paddingAll: "16px",
+          contents: [
+            {
+              type: "text" as const,
+              text: s.name,
+              weight: "bold" as const,
+              size: "xl" as const,
+              wrap: true,
+            },
+            {
+              type: "text" as const,
+              text: s.address,
+              size: "sm" as const,
+              color: "#6b7280",
+              wrap: true,
+            },
+            {
+              type: "separator" as const,
+              margin: "md" as const,
+            },
+            {
+              type: "text" as const,
+              text: `表定 ${s.scheduledTime ?? "未知"}`,
+              size: "md" as const,
+              margin: "md" as const,
+            },
+            {
+              type: "text" as const,
+              text: s.statusLabel,
+              size: "md" as const,
+              color: "#374151",
+              wrap: true,
+            },
+            ...(s.nextArrival
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `下次：${s.nextArrival}`,
+                    size: "sm" as const,
+                    color: "#6b7280",
+                    wrap: true,
+                    margin: "sm" as const,
+                  },
+                ]
+              : []),
+          ],
+        },
+        footer: {
+          type: "box" as const,
+          layout: "vertical" as const,
+          contents: [
+            {
+              type: "button" as const,
+              style: "primary" as const,
+              color: style.bg,
+              height: "md" as const,
+              action: {
+                type: "uri" as const,
+                label: "看這個點在地圖哪",
+                uri: stopMap,
+              },
+            },
+          ],
+        },
+      };
+    });
+
+  return withQuickReply({
+    type: "flex",
+    altText: `附近清運點：建議去 ${rec.name}（${rec.distanceMeters}m）`,
+    contents: {
+      type: "carousel",
+      contents: [recommendBubble, ...stopBubbles],
+    },
+  });
 }
 
 /** Delete picker — show nickname + address */

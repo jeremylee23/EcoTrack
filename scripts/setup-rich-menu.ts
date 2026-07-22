@@ -4,7 +4,7 @@
  *
  * Layout (2500×843):
  *  [ 📍定位 ] [ 🚛垃圾車 ] [ 📅班表 ]
- *  [ ⭐最愛 ] [ 🔍搜尋   ] [ 📖說明 ]
+ *  [ ⭐最愛 ] [ 🗺️附近   ] [ 📖說明 ]
  *
  * Run: npx tsx scripts/setup-rich-menu.ts
  */
@@ -41,11 +41,14 @@ function cellY(row: number): number {
 async function createRichMenuImage(): Promise<string> {
   console.log("🎨 Generating 6-cell Rich Menu image...");
 
+  // No emoji in SVG text — Pango on macOS crashes on color emoji fonts.
+  // Use a colored badge + Chinese labels so seniors can still scan by color.
   const cells: Array<{
     col: number;
     row: number;
     title: string;
     subtitle: string;
+    badge: string;
     bg: string;
     fg: string;
     subFg: string;
@@ -53,8 +56,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 0,
       row: 0,
-      title: "📍 定位",
+      title: "定位",
       subtitle: "綁定住家",
+      badge: "#2563eb",
       bg: "#ffffff",
       fg: "#111827",
       subFg: "#6b7280",
@@ -62,8 +66,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 1,
       row: 0,
-      title: "🚛 垃圾車",
-      subtitle: "即時 ETA",
+      title: "垃圾車",
+      subtitle: "即時到達",
+      badge: "#ffffff",
       bg: "#059669",
       fg: "#ffffff",
       subFg: "#d1fae5",
@@ -71,8 +76,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 2,
       row: 0,
-      title: "📅 班表",
+      title: "班表",
       subtitle: "本週清運",
+      badge: "#ffffff",
       bg: "#0f766e",
       fg: "#ffffff",
       subFg: "#ccfbf1",
@@ -80,8 +86,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 0,
       row: 1,
-      title: "⭐ 最愛",
+      title: "最愛",
       subtitle: "一鍵換地方",
+      badge: "#ea580c",
       bg: "#fff7ed",
       fg: "#9a3412",
       subFg: "#c2410c",
@@ -89,8 +96,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 1,
       row: 1,
-      title: "🔍 搜尋",
-      subtitle: "路名／地標",
+      title: "附近",
+      subtitle: "清運點地圖",
+      badge: "#2563eb",
       bg: "#eff6ff",
       fg: "#1e40af",
       subFg: "#3b82f6",
@@ -98,8 +106,9 @@ async function createRichMenuImage(): Promise<string> {
     {
       col: 2,
       row: 1,
-      title: "📖 說明",
+      title: "說明",
       subtitle: "怎麼用",
+      badge: "#6b7280",
       bg: "#f3f4f6",
       fg: "#374151",
       subFg: "#6b7280",
@@ -118,9 +127,10 @@ async function createRichMenuImage(): Promise<string> {
       return `
         <rect x="${x + pad}" y="${y + pad}" width="${w - pad * 2}" height="${h - pad * 2}"
               rx="28" fill="${c.bg}" />
-        <text x="${cx}" y="${cy - 8}" font-family="Helvetica Neue, Arial, sans-serif"
+        <circle cx="${cx}" cy="${cy - 78}" r="22" fill="${c.badge}" />
+        <text x="${cx}" y="${cy + 18}" font-family="PingFang TC, Heiti TC, sans-serif"
               font-size="88" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
-        <text x="${cx}" y="${cy + 72}" font-family="Helvetica Neue, Arial, sans-serif"
+        <text x="${cx}" y="${cy + 88}" font-family="PingFang TC, Heiti TC, sans-serif"
               font-size="44" font-weight="600" fill="${c.subFg}" text-anchor="middle">${c.subtitle}</text>
       `;
     })
@@ -182,7 +192,7 @@ async function setupRichMenu(): Promise<void> {
         },
         {
           bounds: { x: cellX(1), y: cellY(1), width: COL_W[1], height: ROW_H[1] },
-          action: { type: "message", text: "搜尋" },
+          action: { type: "message", text: "附近清運點" },
         },
         {
           bounds: { x: cellX(2), y: cellY(1), width: COL_W[2], height: ROW_H[1] },

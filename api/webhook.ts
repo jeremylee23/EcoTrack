@@ -647,7 +647,7 @@ async function handleTextMessage(
       coords.label !== "住家"
         ? buildTextMessage(`📍 以「${coords.label}」為中心`)
         : null;
-    const card = withQuickReply(buildNearbyStopsFlex(guide));
+    const card = buildNearbyStopsFlex(guide);
     await replyMessage(
       replyToken,
       header ? [header, card] : [card]

@@ -512,6 +512,8 @@ export interface NearbyStopGuideItem {
   id: string;
   name: string;
   address: string;
+  lat: number;
+  lng: number;
   distanceMeters: number;
   scheduledTime: string | null;
   minutesUntilScheduled: number | null;
@@ -523,6 +525,8 @@ export interface NearbyStopGuideItem {
 
 export interface NearbyStopsGuide {
   radiusMeters: number;
+  userLat: number;
+  userLng: number;
   recommend: NearbyStopGuideItem | null;
   recommendReason: string;
   nearest: NearbyStopGuideItem | null;
@@ -571,6 +575,8 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
     id: `${c.point.routeId}:${c.point.seq}:${c.point.pointId || name}`,
     name,
     address,
+    lat: parseFloat(c.point.lat),
+    lng: parseFloat(c.point.lon),
     distanceMeters: Math.round(c.distanceMeters),
     scheduledTime: c.scheduledTime,
     minutesUntilScheduled: c.minutesUntilScheduled,
@@ -612,6 +618,8 @@ export async function getNearbyStopsGuide(
   if (stops.length === 0) {
     return {
       radiusMeters,
+      userLat,
+      userLng,
       recommend: null,
       recommendReason: "",
       nearest: null,
@@ -678,6 +686,8 @@ export async function getNearbyStopsGuide(
 
   return {
     radiusMeters,
+    userLat,
+    userLng,
     recommend,
     recommendReason,
     nearest,
