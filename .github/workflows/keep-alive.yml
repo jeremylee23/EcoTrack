@@ -1,52 +1,74 @@
-name: Keep Supabase & Vercel Alive
+name: Keep Supabase Alive
+
+# Free Plan: pauses after ~7 days of insufficient DB activity.
+# Docs: a few DB requests each day over the previous week is usually enough.
+# Strategy: ping several times per day (well inside 7 days), with retries.
+# Primary path uses /api/health (queries DB). Optional direct REST if secrets exist.
 
 on:
   schedule:
-    # Every 10 minutes — ping DB via /api/health to reduce Free-tier auto-pause risk
-    - cron: "*/10 * * * *"
+    # Every 6 hours (UTC)
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping health and require database connected
-        run: |
-          set -euo pipefail
-          RESP="$(curl -sS --max-time 30 https://ecotrack-hsinchu.vercel.app/api/health || true)"
-          echo "$RESP"
-          printf '%s' "$RESP" | python3 -c '
-          import json, sys
-          raw = sys.stdin.read().strip()
-          if not raw:
-              print("Empty health response", file=sys.stderr)
-              sys.exit(1)
-          try:
-              data = json.loads(raw)
-          except json.JSONDecodeError as exc:
-              print("Invalid JSON:", exc, file=sys.stderr)
-              sys.exit(1)
-          if data.get("database") != "connected":
-              print("DB not connected:", data.get("database"), file=sys.stderr)
-              sys.exit(1)
-          print("Keep-alive OK: database connected")
-          '
-      - name: Direct Supabase REST ping (optional)
-        if: ${{ vars.ENABLE_DIRECT_SUPABASE_PING == 'true' }}
+      - name: Direct Supabase REST keep-alive (if secrets configured)
+        id: direct
+        continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-            echo "Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY secrets" >&2
+            echo "GitHub secrets not set — skipping direct ping"
             exit 1
           fi
-          curl -sS -f --max-time 30 \
-            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-            "${SUPABASE_URL}/rest/v1/users?select=id&limit=1" \
-            -o /tmp/supabase-ping.json
-          echo "Direct Supabase ping OK"
-          cat /tmp/supabase-ping.json
-          echo
+
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            echo "Direct Supabase ping attempt ${attempt}/3"
+            if curl -sS -f --max-time 30 \
+              -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+              "${SUPABASE_URL}/rest/v1/users?select=id&limit=1" \
+              -o /tmp/supabase-ping.json; then
+              echo "Direct Supabase ping OK"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "Direct Supabase ping failed after 3 attempts" >&2
+          exit 1
+
+      - name: Ping Vercel /api/health (queries Supabase)
+        run: |
+          set -euo pipefail
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            echo "Health ping attempt ${attempt}/3"
+            RESP="$(curl -sS --max-time 30 https://ecotrack-hsinchu.vercel.app/api/health || true)"
+            echo "$RESP"
+            if printf '%s' "$RESP" | python3 -c '
+          import json, sys
+          raw = sys.stdin.read().strip()
+          if not raw:
+              sys.exit(1)
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError:
+              sys.exit(1)
+          sys.exit(0 if data.get("database") == "connected" else 1)
+          '; then
+              echo "Health keep-alive OK"
+              exit 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "Health keep-alive failed after 3 attempts" >&2
+          exit 1

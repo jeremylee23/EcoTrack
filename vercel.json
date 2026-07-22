@@ -5,6 +5,10 @@
     {
       "path": "/api/cron/sync-trucks",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/health",
+      "schedule": "0 */6 * * *"
     }
   ]
 }
