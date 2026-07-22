@@ -1,17 +1,52 @@
-name: Keep Vercel Serverless Alive
+name: Keep Supabase & Vercel Alive
 
 on:
   schedule:
-    # Run every 10 minutes to prevent Vercel Lambda from cold starting
-    - cron: '*/10 * * * *'
-  workflow_dispatch: # Allows manual trigger
+    # Every 10 minutes — ping DB via /api/health to reduce Free-tier auto-pause risk
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Vercel Health Endpoint
-        # Using curl to hit the health endpoint
+      - name: Ping health and require database connected
         run: |
-          curl -s -X GET https://ecotrack-hsinchu.vercel.app/api/health
-          echo "Ping successful!"
+          set -euo pipefail
+          RESP="$(curl -sS --max-time 30 https://ecotrack-hsinchu.vercel.app/api/health || true)"
+          echo "$RESP"
+          printf '%s' "$RESP" | python3 -c '
+          import json, sys
+          raw = sys.stdin.read().strip()
+          if not raw:
+              print("Empty health response", file=sys.stderr)
+              sys.exit(1)
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print("Invalid JSON:", exc, file=sys.stderr)
+              sys.exit(1)
+          if data.get("database") != "connected":
+              print("DB not connected:", data.get("database"), file=sys.stderr)
+              sys.exit(1)
+          print("Keep-alive OK: database connected")
+          '
+      - name: Direct Supabase REST ping (optional)
+        if: ${{ vars.ENABLE_DIRECT_SUPABASE_PING == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY secrets" >&2
+            exit 1
+          fi
+          curl -sS -f --max-time 30 \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            "${SUPABASE_URL}/rest/v1/users?select=id&limit=1" \
+            -o /tmp/supabase-ping.json
+          echo "Direct Supabase ping OK"
+          cat /tmp/supabase-ping.json
+          echo

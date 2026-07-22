@@ -1,6 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseClient } from "../src/services/user.service.js";
 
+/**
+ * Lightweight liveness + Supabase keep-alive probe.
+ * Returns 503 when the database is unreachable so monitors/CI fail loudly
+ * instead of treating a dead DB as healthy.
+ */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   let dbStatus = "unknown";
   try {
@@ -13,10 +18,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     dbStatus = `error: ${err.message || err}`;
   }
 
-  res.status(200).json({
-    status: "alive",
+  const ok = dbStatus === "connected";
+  res.status(ok ? 200 : 503).json({
+    status: ok ? "alive" : "degraded",
     database: dbStatus,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 }
-
