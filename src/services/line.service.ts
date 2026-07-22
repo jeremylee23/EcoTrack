@@ -533,11 +533,11 @@ export function buildLocationConfirmMessage(
 ): TextMessage {
   return withQuickReply(
     buildTextMessage(
-      `📍 已設成「住家」位置\n` +
+      `📍 已記住「定位存的地方」\n` +
         `📌 ${address}` +
         (extraNotice ? `\n${extraNotice}` : "") +
         `\n\n👉 接下來請點下面「🚛 垃圾車」\n` +
-        `若還要存其他地方：點選單「⭐ 最愛」→「新增地方」`
+        `若還要存兒子家、公司：點選單「⭐ 最愛」→「新增地方」`
     )
   ) as TextMessage;
 }
@@ -547,20 +547,21 @@ export function buildWelcomeMessage(): TextMessage {
     buildTextMessage(
       `👋 歡迎使用新竹垃圾車提醒\n\n` +
         `長輩只要點大按鈕：\n` +
-        `1️⃣ 定位 → 設住家\n` +
+        `1️⃣ 定位 → 傳你平常倒垃圾的位置（會記住門牌）\n` +
         `2️⃣ 垃圾車 → 看何時到\n` +
         `3️⃣ 班表 → 哪幾天有收\n` +
-        `4️⃣ 最愛 → 換地方查\n` +
+        `4️⃣ 最愛 → 換地方查（每個地方都寫門牌）\n` +
         `5️⃣ 附近 → 看哪裡可倒（有圖有地圖）\n` +
         `6️⃣ 說明\n\n` +
-        `家人可幫忙：在「最愛」幫地方加暱稱（例如兒子家），\n` +
-        `地址仍會保留，不怕搞混。`
+        `「定位存的地方」＝你用「定位」傳過的那一點；\n` +
+        `「最愛」＝另外加的地方（兒子家、公司等）。\n` +
+        `家人可幫最愛加暱稱，地址仍會顯示。`
     )
   ) as TextMessage;
 }
 
 /**
- * One-tap favorites: nickname primary, address always visible underneath.
+ * One-tap place picker: every option shows a real address — never abstract「住家」alone.
  */
 export function buildFavoritesMenuFlex(options: {
   favorites: Array<{
@@ -571,24 +572,56 @@ export function buildFavoritesMenuFlex(options: {
   }>;
   activeLabel: string;
   activeId?: string | null;
+  /** Doorplate from last 「定位」 — required for seniors to recognize the first option */
+  homeAddress?: string;
 }): FlexMessage {
-  const { favorites, activeId } = options;
+  const { favorites, activeId, homeAddress } = options;
   const isHome = !activeId;
+  const homeAddr =
+    homeAddress?.trim() ||
+    "（還沒有門牌：請再點一次底部「定位」傳位置）";
 
   const homeBlock = {
     type: "box" as const,
     layout: "vertical" as const,
     spacing: "sm" as const,
     margin: "md" as const,
+    paddingAll: "12px" as const,
+    backgroundColor: isHome ? "#ecfdf5" : "#f9fafb",
+    cornerRadius: "md" as const,
     contents: [
+      {
+        type: "text" as const,
+        text: isHome ? "定位存的地方（使用中）" : "定位存的地方",
+        weight: "bold" as const,
+        size: "md" as const,
+        color: "#111827",
+        wrap: true,
+      },
+      {
+        type: "text" as const,
+        text: `📍 ${homeAddr}`,
+        size: "sm" as const,
+        color: "#4b5563",
+        wrap: true,
+      },
+      {
+        type: "text" as const,
+        text: "＝ 你用底部「定位」傳過的位置（不是最愛裡的其他地方）",
+        size: "xs" as const,
+        color: "#6b7280",
+        wrap: true,
+        margin: "sm" as const,
+      },
       {
         type: "button" as const,
         style: (isHome ? "primary" : "secondary") as "primary" | "secondary",
         color: isHome ? "#059669" : undefined,
-        height: "md" as const,
+        height: "sm" as const,
+        margin: "sm" as const,
         action: {
           type: "message" as const,
-          label: isHome ? "🏠 住家（使用中）" : "🏠 住家",
+          label: isHome ? "目前使用這個" : "選這個查車",
           text: "用住家",
         },
       },
@@ -650,7 +683,7 @@ export function buildFavoritesMenuFlex(options: {
     favorites.length > 0
       ? {
           type: "text" as const,
-          text: "大字是暱稱，下面一定會附地址。",
+          text: "上面第一個＝定位存的；下面＝最愛裡加過的其他地方。",
           size: "sm" as const,
           color: "#6b7280",
           wrap: true,
@@ -658,7 +691,7 @@ export function buildFavoritesMenuFlex(options: {
         }
       : {
           type: "text" as const,
-          text: "還沒其他地方。點下面「新增地方」，傳一次位置即可。",
+          text: "若還要查兒子家、公司等，點下面「新增地方」。",
           size: "sm" as const,
           color: "#6b7280",
           wrap: true,
@@ -686,7 +719,7 @@ export function buildFavoritesMenuFlex(options: {
           },
           {
             type: "text",
-            text: "點「選這個查車」就會換成該地並立刻查車。",
+            text: "每個地方都會寫出門牌，點「選這個查車」即可。",
             size: "md",
             color: "#4b5563",
             wrap: true,
@@ -748,11 +781,11 @@ export function buildAskSendLocationFlex(
   purpose: "add" | "home" = "add"
 ): FlexMessage {
   const title =
-    purpose === "add" ? "新增一個地方" : "設定住家位置";
+    purpose === "add" ? "新增一個地方" : "用定位記住你的位置";
   const body =
     purpose === "add"
       ? "請按下面綠色按鈕傳位置。\n系統會自動用地址記住，不用取名。"
-      : "請按下面綠色按鈕傳送住家位置。";
+      : "請按下面綠色按鈕傳位置。\n之後選單會顯示「定位存的地方」＋門牌。";
 
   return {
     type: "flex",

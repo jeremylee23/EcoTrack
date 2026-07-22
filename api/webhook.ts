@@ -78,11 +78,18 @@ function validateLineSignature(
 
 async function getActiveCoords(
   userId: string
-): Promise<{ lat: number; lng: number; label: string } | null> {
+): Promise<{ lat: number; lng: number; label: string; address?: string } | null> {
   const prefs = await getUserPrefs(userId);
   if (prefs.activeFavoriteId) {
     const fav = prefs.favorites.find((f) => f.id === prefs.activeFavoriteId);
-    if (fav) return { lat: fav.lat, lng: fav.lng, label: fav.label };
+    if (fav) {
+      return {
+        lat: fav.lat,
+        lng: fav.lng,
+        label: favoriteDisplayName(fav),
+        address: fav.address || fav.label,
+      };
+    }
   }
 
   const { createClient } = await import("@supabase/supabase-js");
@@ -94,7 +101,12 @@ async function getActiveCoords(
   });
   const coordData = coords as { lat: number; lng: number } | null;
   if (!coordData?.lat) return null;
-  return { lat: coordData.lat, lng: coordData.lng, label: "住家" };
+  return {
+    lat: coordData.lat,
+    lng: coordData.lng,
+    label: "定位存的地方",
+    address: prefs.homeAddress,
+  };
 }
 
 async function replyEtaNow(
@@ -107,7 +119,7 @@ async function replyEtaNow(
     await replyMessage(replyToken, [
       withQuickReply(
         buildTextMessage(
-          "還沒設定位置。\n請先點底部選單「📍 定位」，傳一次住家位置。"
+          "還沒設定位置。\n請先點底部選單「📍 定位」，傳一次你的位置。"
         )
       ),
     ]);
@@ -121,21 +133,11 @@ async function replyEtaNow(
   });
   const prefixParts: string[] = [];
   if (notice) prefixParts.push(notice);
-  if (coords.label !== "住家") {
-    // Prefer nickname + address when tracking a favorite
-    const prefs = await getUserPrefs(userId);
-    const fav = prefs.activeFavoriteId
-      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)
-      : null;
-    if (fav) {
-      prefixParts.push(
-        `📍 現在查的是：${favoriteDisplayName(fav)}` +
-          `\n${fav.address || fav.label}`
-      );
-    } else {
-      prefixParts.push(`📍 現在查的是：${coords.label}`);
-    }
-  }
+  // Always show which place is being queried — seniors need the doorplate
+  prefixParts.push(
+    `📍 現在查的是：${coords.label}` +
+      (coords.address ? `\n${coords.address}` : "")
+  );
   const prefix =
     prefixParts.length > 0
       ? buildTextMessage(prefixParts.join("\n"))
@@ -159,8 +161,9 @@ async function replyFavoritesMenu(
   const menu = withQuickReply(
     buildFavoritesMenuFlex({
       favorites: prefs.favorites,
-      activeLabel: active ? favoriteDisplayName(active) : "住家",
+      activeLabel: active ? favoriteDisplayName(active) : "定位存的地方",
       activeId: prefs.activeFavoriteId,
+      homeAddress: prefs.homeAddress,
     })
   );
   await replyMessage(replyToken, extra ? [extra, menu] : [menu]);
@@ -223,9 +226,11 @@ async function handleLocationMessage(
     return;
   }
 
-  // Default: treat as home location
+  // Default: treat as「定位存的地方」(formerly abstract「住家」)
   await upsertUserLocation(userId, latitude, longitude);
   await clearActiveFavorite(userId);
+  const homeAddress = address?.trim() || "這個位置";
+  await setUserPrefs(userId, { homeAddress });
 
   let routeSwitchNotice = "";
   try {
@@ -250,7 +255,7 @@ async function handleLocationMessage(
   }
 
   await replyMessage(replyToken, [
-    buildLocationConfirmMessage(address ?? "這個位置", routeSwitchNotice),
+    buildLocationConfirmMessage(homeAddress, routeSwitchNotice),
   ]);
 }
 
@@ -297,7 +302,7 @@ async function handleTextMessage(
                   prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)
                     ?.label ?? "?"
                 }）`
-              : "（追蹤住家）") +
+              : "（追蹤：定位存的地方）") +
             `\n\n可改：\n` +
             `• 模式 推薦｜模式 整天\n` +
             `• 半徑 100｜半徑 200｜半徑 500\n` +
@@ -524,9 +529,11 @@ async function handleTextMessage(
     return;
   }
 
-  if (/^用住家$/.test(text) || /^用家$/.test(text)) {
+  if (/^用住家$/.test(text) || /^用家$/.test(text) || /^用定位存的地方$/.test(text)) {
     await clearActiveFavorite(userId);
-    await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
+    const prefs = await getUserPrefs(userId);
+    const addr = prefs.homeAddress ? `\n📍 ${prefs.homeAddress}` : "";
+    await replyEtaNow(userId, replyToken, `✅ 已換成「定位存的地方」${addr}`);
     return;
   }
 
@@ -556,9 +563,11 @@ async function handleTextMessage(
   const usePlaceMatch = text.match(/^用(.+)$/);
   if (usePlaceMatch) {
     const label = usePlaceMatch[1].trim();
-    if (label === "住家" || label === "家") {
+    if (label === "住家" || label === "家" || label === "定位存的地方") {
       await clearActiveFavorite(userId);
-      await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
+      const prefsHome = await getUserPrefs(userId);
+      const addr = prefsHome.homeAddress ? `\n📍 ${prefsHome.homeAddress}` : "";
+      await replyEtaNow(userId, replyToken, `✅ 已換成「定位存的地方」${addr}`);
       return;
     }
     const prefs = await getUserPrefs(userId);
@@ -590,9 +599,11 @@ async function handleTextMessage(
   const switchMatch = text.match(/^切換\s+(.+)$/);
   if (switchMatch) {
     const label = switchMatch[1].trim();
-    if (label === "住家" || label === "家") {
+    if (label === "住家" || label === "家" || label === "定位存的地方") {
       await clearActiveFavorite(userId);
-      await replyEtaNow(userId, replyToken, "✅ 已換成「住家」");
+      const prefsHome = await getUserPrefs(userId);
+      const addr = prefsHome.homeAddress ? `\n📍 ${prefsHome.homeAddress}` : "";
+      await replyEtaNow(userId, replyToken, `✅ 已換成「定位存的地方」${addr}`);
       return;
     }
     const prefs = await getUserPrefs(userId);
@@ -659,7 +670,7 @@ async function handleTextMessage(
     const coords = await getActiveCoords(userId);
     if (!coords) {
       await replyMessage(replyToken, [
-        withQuickReply(buildTextMessage("請先點選單「定位」傳住家位置。")),
+        withQuickReply(buildTextMessage("請先點選單「定位」傳你的位置。")),
       ]);
       return;
     }

@@ -31,6 +31,8 @@ export interface UserPrefs {
   radiusMeters: number;
   activeFavoriteId: string | null;
   favorites: FavoriteSpot[];
+  /** Address from last 「定位」 send — shown so seniors aren't confused by abstract「住家」 */
+  homeAddress?: string;
 }
 
 type PendingAction =
@@ -78,6 +80,7 @@ export async function getUserPrefs(userId: string): Promise<UserPrefs> {
           nickname: f.nickname?.trim() || undefined,
         }))
       : [],
+    homeAddress: parsed.homeAddress?.trim() || undefined,
   };
 }
 
@@ -93,6 +96,10 @@ export async function setUserPrefs(
       patch.radiusMeters ?? current.radiusMeters
     ),
     favorites: (patch.favorites ?? current.favorites).slice(0, 3),
+    homeAddress:
+      patch.homeAddress !== undefined
+        ? patch.homeAddress?.trim() || undefined
+        : current.homeAddress,
   };
   const redis = getRedis();
   await redis.set(PREFS_KEY(userId), JSON.stringify(next), {

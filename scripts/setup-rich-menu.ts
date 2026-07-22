@@ -57,7 +57,7 @@ async function createRichMenuImage(): Promise<string> {
       col: 0,
       row: 0,
       title: "定位",
-      subtitle: "綁定住家",
+      subtitle: "傳你的位置",
       badge: "#2563eb",
       bg: "#ffffff",
       fg: "#111827",
