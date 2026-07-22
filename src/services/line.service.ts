@@ -1178,21 +1178,57 @@ export function buildNearbyStopsFlex(guide: {
               color: "#374151",
               margin: "md",
             },
-            {
-              type: "text",
-              text: `時間 ${rec.scheduledTime ?? "未知"}`,
-              size: "lg",
-              color: "#374151",
-              margin: "sm",
-            },
-            {
-              type: "text",
-              text: rec.statusLabel,
-              size: "md",
-              color: "#065f46",
-              wrap: true,
-              margin: "sm",
-            },
+            ...(rec.etaMinutes !== undefined
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `預估約 ${rec.etaMinutes} 分後到（約 ${formatAbsoluteTime(rec.etaMinutes)}）`,
+                    weight: "bold" as const,
+                    size: "xl" as const,
+                    color: "#059669",
+                    wrap: true,
+                    margin: "md" as const,
+                  },
+                  {
+                    type: "text" as const,
+                    text: `表定 ${rec.scheduledTime ?? "未知"}（僅供參考）`,
+                    size: "sm" as const,
+                    color: "#6b7280",
+                    margin: "sm" as const,
+                  },
+                ]
+              : [
+                  {
+                    type: "text" as const,
+                    text: `表定 ${rec.scheduledTime ?? "未知"}`,
+                    size: "lg" as const,
+                    color: "#374151",
+                    margin: "sm" as const,
+                  },
+                  {
+                    type: "text" as const,
+                    text:
+                      rec.status === "upcoming" || rec.status === "live"
+                        ? `${rec.statusLabel}\n（當日有訊號時會改顯示預估幾分後到）`
+                        : rec.statusLabel,
+                    size: "md" as const,
+                    color: "#065f46",
+                    wrap: true,
+                    margin: "sm" as const,
+                  },
+                ]),
+            ...(rec.etaMinutes !== undefined
+              ? [
+                  {
+                    type: "text" as const,
+                    text: rec.statusLabel,
+                    size: "sm" as const,
+                    color: "#047857",
+                    wrap: true,
+                    margin: "sm" as const,
+                  },
+                ]
+              : []),
             ...(guide.areaNextArrival || rec.nextArrival
               ? [
                   {
@@ -1218,7 +1254,7 @@ export function buildNearbyStopsFlex(guide: {
         },
         {
           type: "text",
-          text: "往右滑看其他點。同街常有下午＋晚上；主街可倒就不必進巷。",
+          text: "當天有車訊號時會顯示「預估幾分後到」；沒訊號才只看表定。",
           size: "sm",
           color: "#6b7280",
           align: "center",
@@ -1326,10 +1362,27 @@ export function buildNearbyStopsFlex(guide: {
             },
             {
               type: "text" as const,
-              text: `表定 ${s.scheduledTime ?? "未知"}`,
+              text:
+                s.etaMinutes !== undefined
+                  ? `預估約 ${s.etaMinutes} 分後（約 ${formatAbsoluteTime(s.etaMinutes)}）`
+                  : `表定 ${s.scheduledTime ?? "未知"}`,
               size: "md" as const,
               margin: "md" as const,
+              color: s.etaMinutes !== undefined ? "#059669" : "#374151",
+              ...(s.etaMinutes !== undefined
+                ? { weight: "bold" as const }
+                : {}),
             },
+            ...(s.etaMinutes !== undefined
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `表定 ${s.scheduledTime ?? "未知"}（參考）`,
+                    size: "sm" as const,
+                    color: "#6b7280",
+                  },
+                ]
+              : []),
             {
               type: "text" as const,
               text: s.statusLabel,

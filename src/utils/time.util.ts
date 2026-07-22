@@ -5,6 +5,15 @@
  */
 export const SCHEDULE_LATE_GRACE_MINUTES = 120;
 
+/** Taiwan clock HH:MM for "now + etaMinutes". */
+export function formatEtaClock(etaMinutes: number): string {
+  const now = new Date();
+  const target = new Date(now.getTime() + etaMinutes * 60_000 + 8 * 3_600_000);
+  const h = target.getUTCHours().toString().padStart(2, "0");
+  const m = target.getUTCMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 export function getNextScheduledArrival(
   daysString: string | null, // e.g., "1,2,4,5,6" (1=Mon, 7=Sun)
   scheduledTime: string | null, // e.g., "18:30"

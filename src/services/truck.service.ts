@@ -24,7 +24,7 @@ import type {
   HccgCleanPoint,
   HccgCleanPointData,
 } from "../types/index.js";
-import { getNextScheduledArrival, SCHEDULE_LATE_GRACE_MINUTES } from "../utils/time.util.js";
+import { getNextScheduledArrival, SCHEDULE_LATE_GRACE_MINUTES, formatEtaClock } from "../utils/time.util.js";
 import {
   applyEtaBias,
   clampEtaBiasMinutes,
@@ -617,7 +617,7 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
   let statusLabel: string;
   if (etaMinutes !== undefined) {
     status = "live";
-    statusLabel = `即時約 ${etaMinutes} 分`;
+    statusLabel = `預估約 ${etaMinutes} 分後到（約 ${formatEtaClock(etaMinutes)}）`;
   } else if (!hasToday) {
     status = "no_service";
     statusLabel = "今日無收運";
@@ -629,7 +629,7 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
     statusLabel = `表定已過 ${Math.abs(c.minutesUntilScheduled)} 分（可能延誤中）`;
   } else if (c.minutesUntilScheduled !== null) {
     status = "upcoming";
-    statusLabel = `約 ${c.minutesUntilScheduled} 分後（表定）`;
+    statusLabel = `表定約 ${c.minutesUntilScheduled} 分後（約 ${formatEtaClock(c.minutesUntilScheduled)}）`;
   } else {
     status = "upcoming";
     statusLabel = "今日有班（時間未知）";
@@ -656,6 +656,55 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
     etaMinutes,
     nextArrival: nextInfo?.dateStr,
   };
+}
+
+/**
+ * If HCCG has no live estimate yet, try truck GPS → ETA to this stop.
+ * Same-day recommendations should show arrival estimate, not only 表定.
+ */
+async function enrichGuideItemWithLiveEta(
+  item: NearbyStopGuideItem,
+  candidate: NearbyPointCandidate
+): Promise<NearbyStopGuideItem> {
+  if (item.etaMinutes !== undefined) {
+    return {
+      ...item,
+      status: "live",
+      statusLabel: `預估約 ${item.etaMinutes} 分後到（約 ${formatEtaClock(item.etaMinutes)}）`,
+    };
+  }
+  if (item.status === "passed" || item.status === "no_service") return item;
+  if (!candidate.hasTodayGarbage && !candidate.hasTodayRecycling) return item;
+
+  try {
+    const truckData = await loadLiveTrucksForRoute(candidate.point.routeId);
+    const truck = truckData.garbage ?? truckData.recycling;
+    if (!truck) return item;
+
+    const seq = parseInt(candidate.point.seq, 10) || 0;
+    if (isSequencePastStop(truck.heading_to_stop_sequence, seq)) {
+      return {
+        ...item,
+        status: "passed",
+        statusLabel: "即時判斷：車已過此站",
+        etaMinutes: undefined,
+      };
+    }
+
+    const etaMinutes = Math.max(
+      1,
+      Math.round(estimateEtaFromTruck(truck, item.lat, item.lng, seq))
+    );
+    return {
+      ...item,
+      etaMinutes,
+      status: "live",
+      statusLabel: `預估約 ${etaMinutes} 分後到（約 ${formatEtaClock(etaMinutes)}）`,
+    };
+  } catch (err) {
+    console.error("[TruckService] enrich live ETA failed:", err);
+    return item;
+  }
 }
 
 /**
@@ -776,6 +825,24 @@ export async function getNearbyStopsGuide(
     }
   }
 
+  // Same-day: attach live ETA to recommended stop (and matching list row).
+  const recIdx = stops.findIndex((s) => s.id === recommend.id);
+  const recCandidate = recIdx >= 0 ? pool[recIdx] : undefined;
+  if (recCandidate) {
+    recommend = await enrichGuideItemWithLiveEta(recommend, recCandidate);
+    if (recIdx >= 0) stops[recIdx] = recommend;
+  }
+
+  // Also enrich a few other upcoming stops that lack official live ETA.
+  await Promise.all(
+    stops.slice(0, 5).map(async (s, i) => {
+      if (s.id === recommend.id) return;
+      if (s.status !== "live" && s.status !== "upcoming") return;
+      if (s.etaMinutes !== undefined) return;
+      stops[i] = await enrichGuideItemWithLiveEta(s, pool[i]);
+    })
+  );
+
   const nearest = [...stops].sort(
     (a, b) => a.distanceMeters - b.distanceMeters
   )[0];
@@ -794,6 +861,9 @@ export async function getNearbyStopsGuide(
     `⭐ 建議：${recommend.name}（${recommend.distanceMeters}m）`,
     `   ${recommendReason}`,
     `   表定 ${recommend.scheduledTime ?? "未知"}｜${recommend.statusLabel}`,
+    recommend.etaMinutes !== undefined
+      ? `   ⏱ 預估抵達推薦點：約 ${recommend.etaMinutes} 分後（${formatEtaClock(recommend.etaMinutes)}）`
+      : null,
     areaEarliest
       ? `   附近下次最早：${areaEarliest.dateStr}（${areaEarliest.stopName}）`
       : recommend.nextArrival
