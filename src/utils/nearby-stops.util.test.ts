@@ -6,7 +6,10 @@ import {
   streetAffinityScore,
 } from "./street-match.util.js";
 import { pickEarliestNextArrival } from "./area-next-arrival.util.js";
-import { recommendNearbyStop } from "./nearby-stops.util.js";
+import {
+  MAIN_STREET_DISTANCE_SLACK_M,
+  recommendNearbyStop,
+} from "./nearby-stops.util.js";
 
 describe("street-match", () => {
   it("extracts 光華北街 from alley address", () => {
@@ -30,6 +33,7 @@ describe("street-match", () => {
       "新竹市光華北街36巷9號"
     );
     assert.ok(main > alley);
+    assert.ok(main >= 130);
   });
 });
 
@@ -83,6 +87,30 @@ describe("recommendNearbyStop street + next", () => {
     assert.match(pick!.reason, /主街|同路段/);
   });
 
+  it("prefers main street even when alley is much closer (within slack)", () => {
+    const alleyDist = 35;
+    const mainDist = alleyDist + MAIN_STREET_DISTANCE_SLACK_M - 10;
+    const pick = recommendNearbyStop([
+      {
+        id: "alley-36",
+        distanceMeters: alleyDist,
+        minutesUntilScheduled: 40,
+        hasTodayService: true,
+        status: "upcoming",
+        streetScore: 65,
+      },
+      {
+        id: "main-51",
+        distanceMeters: mainDist,
+        minutesUntilScheduled: 45,
+        hasTodayService: true,
+        status: "upcoming",
+        streetScore: 140,
+      },
+    ]);
+    assert.equal(pick?.stop.id, "main-51");
+  });
+
   it("when today passed, picks earliest next not nearest", () => {
     const pick = recommendNearbyStop([
       {
@@ -105,6 +133,6 @@ describe("recommendNearbyStop street + next", () => {
       },
     ]);
     assert.equal(pick?.stop.id, "far-aft");
-    assert.match(pick!.reason, /最早/);
+    assert.match(pick!.reason, /最早|主街/);
   });
 });

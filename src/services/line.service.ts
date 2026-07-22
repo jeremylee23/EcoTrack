@@ -163,6 +163,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
   const pathLng = eta.userLng ?? eta.stopLng;
   if (pathLat !== undefined) params.append("pathLat", String(pathLat));
   if (pathLng !== undefined) params.append("pathLng", String(pathLng));
+  // Lock map wait-pin to the same stop as the Flex template
+  params.append("lockStop", "1");
   const mapUrl = `${baseUrl}?${params.toString()}`;
 
   const altText = eta.noServiceToday
@@ -1028,6 +1030,8 @@ export function buildNearbyStopsFlex(guide: {
     statusLabel: string;
     etaMinutes?: number;
     nextArrival?: string;
+    routeId?: string;
+    routeName?: string;
   } | null;
   stops: Array<{
     id: string;
@@ -1041,6 +1045,8 @@ export function buildNearbyStopsFlex(guide: {
     statusLabel: string;
     etaMinutes?: number;
     nextArrival?: string;
+    routeId?: string;
+    routeName?: string;
   }>;
 }): Message {
   if (!guide.recommend || guide.stops.length === 0) {
@@ -1067,20 +1073,33 @@ export function buildNearbyStopsFlex(guide: {
   };
 
   const buildMapUrl = (
-    focus?: { lat: number; lng: number; name: string }
+    focus?: { lat: number; lng: number; name: string; routeId?: string; routeName?: string }
   ): string => {
     const params = new URLSearchParams();
     params.set("uLat", String(guide.userLat));
     params.set("uLng", String(guide.userLng));
     params.set("radius", String(guide.radiusMeters));
-    if (focus) {
-      params.set("sLat", String(focus.lat));
-      params.set("sLng", String(focus.lng));
-      params.set("stop", focus.name);
-    } else if (guide.recommend) {
-      params.set("sLat", String(guide.recommend.lat));
-      params.set("sLng", String(guide.recommend.lng));
-      params.set("stop", guide.recommend.name);
+    const target = focus
+      ? focus
+      : guide.recommend
+        ? {
+            lat: guide.recommend.lat,
+            lng: guide.recommend.lng,
+            name: guide.recommend.name,
+            routeId: guide.recommend.routeId,
+            routeName: guide.recommend.routeName,
+          }
+        : null;
+    if (target) {
+      params.set("sLat", String(target.lat));
+      params.set("sLng", String(target.lng));
+      params.set("stop", target.name);
+      if (target.routeId) params.set("routeId", target.routeId);
+      if (target.routeName) params.set("routeName", target.routeName);
+      // Keep route-path "wait here" locked to the SAME pin as the Flex card
+      params.set("pathLat", String(guide.userLat));
+      params.set("pathLng", String(guide.userLng));
+      params.set("lockStop", "1");
     }
     const near = guide.stops
       .slice(0, 8)
@@ -1298,7 +1317,13 @@ export function buildNearbyStopsFlex(guide: {
     .map((s, i) => {
       const style = statusStyle(s.status);
       const isRec = s.id === rec.id;
-      const stopMap = buildMapUrl({ lat: s.lat, lng: s.lng, name: s.name });
+      const stopMap = buildMapUrl({
+        lat: s.lat,
+        lng: s.lng,
+        name: s.name,
+        routeId: s.routeId,
+        routeName: s.routeName,
+      });
       return {
         type: "bubble" as const,
         size: "mega" as const,

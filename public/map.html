@@ -198,6 +198,7 @@
     const routeName = params.get('routeName') || '';
     const pathLat = parseFloat(params.get('pathLat'));
     const pathLng = parseFloat(params.get('pathLng'));
+    const lockStop = params.get('lockStop') === '1';
 
     // 2. Setup map
     const map = L.map('map', {
@@ -351,6 +352,22 @@
         pts.forEach(function (p) { bounds.extend(p); });
 
         var closest = data.closest;
+        // If Flex/ETA already chose a recommend pin (sLat/sLng), KEEP IT.
+        // Do not let route-path "nearest on polyline" override into an alley.
+        if (lockStop && !isNaN(sLat) && !isNaN(sLng)) {
+          var tipRowLocked = document.getElementById('routeTipRow');
+          var tipElLocked = document.getElementById('routeTip');
+          if (tipRowLocked && tipElLocked) {
+            tipRowLocked.style.display = 'flex';
+            tipElLocked.textContent =
+              '藍線＝完整路線；紅旗＝訊息建議等候處（與卡片同步，不會改推巷弄）';
+          }
+          if (bounds.isValid()) {
+            map.fitBounds(bounds, { padding: [48, 48], maxZoom: 17 });
+          }
+          return;
+        }
+
         if (closest && !isNaN(closest.lat) && !isNaN(closest.lng)) {
           var waitLabel = closest.etaMinutes != null
             ? ('在這等 · 約' + closest.etaMinutes + '分')

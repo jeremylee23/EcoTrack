@@ -34,7 +34,7 @@ import {
 } from "../utils/eta-policy.util.js";
 import { clampRadiusMeters, type LocateMode } from "./prefs.service.js";
 import { formatAreaWeekSchedule } from "./schedule.service.js";
-import { recommendNearbyStop } from "../utils/nearby-stops.util.js";
+import { recommendNearbyStop, pickPreferredCandidateIndex } from "../utils/nearby-stops.util.js";
 import { streetAffinityScore } from "../utils/street-match.util.js";
 import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 
@@ -590,6 +590,10 @@ export interface NearbyStopGuideItem {
   statusLabel: string;
   etaMinutes?: number;
   nextArrival?: string;
+  /** For map URL sync with ETA / route-path */
+  routeId?: string;
+  routeName?: string;
+  seq?: number;
 }
 
 export interface NearbyStopsGuide {
@@ -655,6 +659,9 @@ function candidateToGuideItem(c: NearbyPointCandidate): NearbyStopGuideItem {
     statusLabel,
     etaMinutes,
     nextArrival: nextInfo?.dateStr,
+    routeId: c.point.routeId,
+    routeName: c.point.routeName,
+    seq: parseInt(c.point.seq, 10) || 0,
   };
 }
 
@@ -727,13 +734,44 @@ export async function getNearbyStopsGuide(
   });
 
   const inRange = candidates
-    .filter((c) => c.distanceMeters <= searchRadius)
+    .filter((c) => c.distanceMeters <= Math.max(searchRadius, 250))
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 
-  const pool = (inRange.length > 0 ? inRange : candidates.slice(0, 8)).slice(
-    0,
-    12
-  );
+  // Pool = nearest by distance + same-street main-road pins (so 光華北街 isn't dropped)
+  const byDistance = (inRange.length > 0 ? inRange : candidates).slice(0, 8);
+  const sameStreet = (inRange.length > 0 ? inRange : candidates)
+    .filter(
+      (c) =>
+        streetAffinityScore(
+          homeAddress,
+          c.point.pointName || "",
+          c.point.address || ""
+        ) >= 100
+    )
+    .sort((a, b) => {
+      const sa = streetAffinityScore(
+        homeAddress,
+        a.point.pointName || "",
+        a.point.address || ""
+      );
+      const sb = streetAffinityScore(
+        homeAddress,
+        b.point.pointName || "",
+        b.point.address || ""
+      );
+      return sb - sa || a.distanceMeters - b.distanceMeters;
+    })
+    .slice(0, 6);
+
+  const seen = new Set<string>();
+  const pool: NearbyPointCandidate[] = [];
+  for (const c of [...sameStreet, ...byDistance]) {
+    const key = `${c.point.routeId}:${c.point.seq}:${c.point.lat}:${c.point.time}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pool.push(c);
+    if (pool.length >= 14) break;
+  }
   const stops = pool.map(candidateToGuideItem);
 
   if (stops.length === 0) {
@@ -1014,38 +1052,32 @@ export async function calculateEta(
   const radiusMeters = clampRadiusMeters(options.radiusMeters ?? 100);
   const homeAddress = options.homeAddress;
   const candidates = await selectNearbyCandidates(userLat, userLng, {
-    locateMode,
-    radiusMeters: Math.max(radiusMeters, 150),
+    locateMode: "all_day", // same pool as「附近」— rank in JS so results match
+    radiusMeters: Math.max(radiusMeters, 200),
+    homeAddress,
   });
 
-  // Prefer same-street main-road pin over a slightly closer alley pin.
-  let candidate = candidates[0];
-  if (homeAddress && candidates.length > 1) {
-    const ranked = [...candidates].sort((a, b) => {
-      const sa = streetAffinityScore(
-        homeAddress,
-        a.point.pointName || "",
-        a.point.address || ""
-      );
-      const sb = streetAffinityScore(
-        homeAddress,
-        b.point.pointName || "",
-        b.point.address || ""
-      );
-      return sb - sa || a.distanceMeters - b.distanceMeters;
-    });
-    const best = ranked[0];
-    const bestScore = streetAffinityScore(
-      homeAddress,
-      best.point.pointName || "",
-      best.point.address || ""
+  // SAME picker as getNearbyStopsGuide / Flex / map
+  let candidate: NearbyPointCandidate | undefined;
+  if (candidates.length > 0) {
+    const idx = pickPreferredCandidateIndex(
+      candidates.map((c) => ({
+        distanceMeters: c.distanceMeters,
+        minutesUntilScheduled: c.minutesUntilScheduled,
+        etaMinutes: c.garbageEtaMinutes ?? c.recyclingEtaMinutes,
+        hasTodayService: c.hasTodayGarbage || c.hasTodayRecycling,
+        streetScore: streetAffinityScore(
+          homeAddress,
+          c.point.pointName || "",
+          c.point.address || ""
+        ),
+        passed: isSchedulePastGrace(
+          c.hasTodayGarbage || c.hasTodayRecycling,
+          c.minutesUntilScheduled
+        ),
+      }))
     );
-    if (
-      bestScore >= 100 &&
-      best.distanceMeters <= (candidates[0]?.distanceMeters ?? 0) + 120
-    ) {
-      candidate = best;
-    }
+    candidate = candidates[idx >= 0 ? idx : 0];
   }
 
   if (!candidate) {
@@ -1065,26 +1097,48 @@ export async function calculateEta(
     candidateHasOfficialEta(candidate) ||
     Boolean(truckData.garbage || truckData.recycling);
 
-  // Alt-route fallback: if primary has no live signal, try other stops ≤100m away.
+  // Alt-route fallback: if primary has no live signal, try other stops with signal.
+  // Still prefer same-street main road among alts (stay in sync with「附近」).
   if (!primaryHasSignal) {
-    for (const alt of candidates.slice(1)) {
-      if (alt.distanceMeters > ALT_ROUTE_RADIUS_M) continue;
+    const alts: NearbyPointCandidate[] = [];
+    for (const alt of candidates) {
+      if (alt === candidate) continue;
+      if (alt.distanceMeters > Math.max(ALT_ROUTE_RADIUS_M, 180)) continue;
       if (alt.point.routeId === candidate.point.routeId) continue;
-
       const altTrucks = await loadLiveTrucksForRoute(alt.point.routeId);
       if (
         candidateHasOfficialEta(alt) ||
         altTrucks.garbage ||
         altTrucks.recycling
       ) {
-        console.log(
-          `[TruckService] Switched to alt route ${alt.point.routeId} (${alt.distanceMeters.toFixed(0)}m)`
-        );
-        candidate = alt;
-        truckData = altTrucks;
-        usedAlternateRoute = true;
-        break;
+        alts.push(alt);
       }
+    }
+    if (alts.length > 0) {
+      const idx = pickPreferredCandidateIndex(
+        alts.map((c) => ({
+          distanceMeters: c.distanceMeters,
+          minutesUntilScheduled: c.minutesUntilScheduled,
+          etaMinutes: c.garbageEtaMinutes ?? c.recyclingEtaMinutes,
+          hasTodayService: c.hasTodayGarbage || c.hasTodayRecycling,
+          streetScore: streetAffinityScore(
+            homeAddress,
+            c.point.pointName || "",
+            c.point.address || ""
+          ),
+          passed: isSchedulePastGrace(
+            c.hasTodayGarbage || c.hasTodayRecycling,
+            c.minutesUntilScheduled
+          ),
+        }))
+      );
+      const chosen = alts[idx >= 0 ? idx : 0];
+      console.log(
+        `[TruckService] Switched to alt route ${chosen.point.routeId} (${chosen.distanceMeters.toFixed(0)}m)`
+      );
+      candidate = chosen;
+      truckData = await loadLiveTrucksForRoute(candidate.point.routeId);
+      usedAlternateRoute = true;
     }
   }
 
@@ -1097,18 +1151,42 @@ export async function calculateEta(
   let stopName = point.pointName || point.address;
   const weekday = getTaiwanWeekday();
 
-  // Prefer the point ON this truck's full route that is closest to home
-  // (along-route collection often isn't the official "nearest clean point").
+  // Along-route DB point: may refine seq/ETA, but MUST NOT override a better
+  // main-street HCCG pin with a nearer alley (Flex / map stay in sync).
   try {
     const onRoute = await findClosestDbStopOnRoute(routeId, userLat, userLng);
     if (onRoute) {
-      stopLat = onRoute.lat;
-      stopLng = onRoute.lng;
-      targetSequence = onRoute.seq || targetSequence;
-      stopName = onRoute.name || stopName;
-      if (onRoute.scheduledTime) formattedTime = onRoute.scheduledTime;
-      point.pointName = stopName;
-      point.address = onRoute.address || point.address;
+      const curScore = streetAffinityScore(
+        homeAddress,
+        stopName || "",
+        point.address || ""
+      );
+      const orScore = streetAffinityScore(
+        homeAddress,
+        onRoute.name || "",
+        onRoute.address || ""
+      );
+      const pinDistM =
+        haversineDistance(stopLat, stopLng, onRoute.lat, onRoute.lng) * 1000;
+      const allowOverride =
+        orScore > curScore + 10 ||
+        (orScore >= curScore && pinDistM < 80) ||
+        (!homeAddress && pinDistM < 80);
+
+      if (allowOverride) {
+        stopLat = onRoute.lat;
+        stopLng = onRoute.lng;
+        targetSequence = onRoute.seq || targetSequence;
+        stopName = onRoute.name || stopName;
+        if (onRoute.scheduledTime) formattedTime = onRoute.scheduledTime;
+        point.pointName = stopName;
+        point.address = onRoute.address || point.address;
+      } else if (pinDistM < 80) {
+        // Same place — keep displayed name/coords, take seq/time only
+        targetSequence = onRoute.seq || targetSequence;
+        if (onRoute.scheduledTime) formattedTime = onRoute.scheduledTime;
+      }
+      // else: keep HCCG main-street recommend; do not jump into 巷
     }
   } catch (err) {
     console.error("[TruckService] closest-on-route override failed:", err);
