@@ -118,6 +118,25 @@ export async function getNearestStop(
 }
 
 /**
+ * Toggle approaching-truck push reminders.
+ */
+export async function setNotifyEnabled(
+  lineUserId: string,
+  enabled: boolean
+): Promise<boolean> {
+  const db = getSupabaseClient();
+  const { error } = await db
+    .from("users")
+    .update({ notify_enabled: enabled })
+    .eq("line_user_id", lineUserId);
+
+  if (error) {
+    throw new Error(`[UserService] setNotifyEnabled failed: ${error.message}`);
+  }
+  return enabled;
+}
+
+/**
  * Users eligible for approaching-truck push reminders.
  */
 export async function listUsersForNotify(limit = 80): Promise<

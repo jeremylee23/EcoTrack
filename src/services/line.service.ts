@@ -47,7 +47,49 @@ export async function pushMessage(
 
 // ── Message builders ─────────────────────────────────────────
 
-// Removed withQuickReply as we now use Rich Menu
+/** Compact quick replies under the last bubble (complements the 6-cell Rich Menu). */
+export const MAIN_QUICK_REPLIES: messagingApi.QuickReplyItem[] = [
+  {
+    type: "action",
+    action: { type: "message", label: "🚛 垃圾車", text: "垃圾車" },
+  },
+  {
+    type: "action",
+    action: { type: "message", label: "📅 班表", text: "班表" },
+  },
+  {
+    type: "action",
+    action: { type: "message", label: "⭐ 最愛", text: "最愛" },
+  },
+  {
+    type: "action",
+    action: { type: "message", label: "🔍 搜尋", text: "搜尋" },
+  },
+  {
+    type: "action",
+    action: { type: "message", label: "📖 說明", text: "說明" },
+  },
+];
+
+export function withQuickReply(
+  message: Message,
+  items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
+): Message {
+  return {
+    ...message,
+    quickReply: { items },
+  };
+}
+
+export function attachQuickReplyToLast(
+  messages: Message[],
+  items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
+): Message[] {
+  if (messages.length === 0) return messages;
+  const next = [...messages];
+  next[next.length - 1] = withQuickReply(next[next.length - 1], items);
+  return next;
+}
 
 export function buildTextMessage(text: string): TextMessage {
   return { type: "text", text };
@@ -73,7 +115,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     !eta.nextRecycleDate &&
     !eta.noServiceToday
   ) {
-    return [buildTextMessage(eta.message)];
+    return attachQuickReplyToLast([buildTextMessage(eta.message)]);
   }
 
   // Construct Map URL
@@ -455,35 +497,40 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     }
   };
 
-  return [flexMessage];
+  return attachQuickReplyToLast([flexMessage]);
 }
 
 export function buildLocationConfirmMessage(
   address: string,
   extraNotice = ""
 ): TextMessage {
-  return buildTextMessage(
-    `📍 已記錄您的位置！\n` +
-      `📌 地址：${address}` +
-      (extraNotice ? `\n${extraNotice}` : "") +
-      `\n\n✅ 設定完成！傳「垃圾車」查即時 ETA，傳「班表」看整週。\n` +
-      `⭐ 收藏 公司｜切換 公司｜最愛\n` +
-      `📏 半徑 200｜⚙️ 模式 推薦｜整天｜🔍 查 路名`
-  );
+  return withQuickReply(
+    buildTextMessage(
+      `📍 已記錄您的位置！\n` +
+        `📌 地址：${address}` +
+        (extraNotice ? `\n${extraNotice}` : "") +
+        `\n\n✅ 設定完成！點下方選單「垃圾車」查 ETA，或「班表」看整週。\n` +
+        `⭐ 收藏 公司｜切換 公司｜最愛\n` +
+        `📏 半徑 200｜⚙️ 模式 推薦｜整天｜🔔 通知 開／關`
+    )
+  ) as TextMessage;
 }
 
 export function buildWelcomeMessage(): TextMessage {
-  return buildTextMessage(
-    `👋 歡迎使用 EcoTrack（比官方清運網更快一層）\n\n` +
-      `📍 先傳 GPS 綁定住家，再試這些指令：\n` +
-      `• 垃圾車 → 即時 ETA＋靠近推播\n` +
-      `• 班表 → 整週清運日（優於官方彈窗）\n` +
-      `• 查 中正路 → 關鍵字搜尋＋距離排序\n` +
-      `• 半徑 50~500｜模式 推薦／整天\n` +
-      `• 收藏 公司｜切換 公司｜最愛（最多 3 點）\n\n` +
-      `🗺️ 地圖可一次看附近待清運點\n` +
-      `📡 服務範圍：新竹市全市`
-  );
+  return withQuickReply(
+    buildTextMessage(
+      `👋 歡迎使用 EcoTrack（比官方清運網更快一層）\n\n` +
+        `底部選單 6 鍵：\n` +
+        `📍 定位｜🚛 垃圾車｜📅 班表\n` +
+        `⭐ 最愛｜🔍 搜尋｜📖 說明\n\n` +
+        `進階指令：\n` +
+        `• 查 中正路 → 關鍵字搜尋\n` +
+        `• 半徑 50~500｜模式 推薦／整天\n` +
+        `• 收藏 公司｜切換 公司\n` +
+        `• 通知 開／關 → 靠近推播\n\n` +
+        `📡 服務範圍：新竹市全市`
+    )
+  ) as TextMessage;
 }
 
 function formatAbsoluteTime(etaMinutes: number): string {

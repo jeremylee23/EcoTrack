@@ -8,7 +8,8 @@ const secretPatterns = [
   /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/i,
   // Other generic tokens/secrets
   /['"](sk-[A-Za-z0-9_]{30,})['"]/i,  // OpenAI/Stripe style keys
-  /LINE_CHANNEL_ACCESS_TOKEN|LINE_CHANNEL_SECRET/i
+  // Env var *names* alone are fine; only flag if a literal value is assigned.
+  /(?:LINE_CHANNEL_ACCESS_TOKEN|LINE_CHANNEL_SECRET)\s*[=:]\s*['"][^'"]+['"]/i
 ];
 
 try {

@@ -6,7 +6,11 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import crypto from "crypto";
 import type { webhook } from "@line/bot-sdk";
 import { config } from "../src/config/index.js";
-import { upsertUserLocation, getUserByLineId } from "../src/services/user.service.js";
+import {
+  upsertUserLocation,
+  getUserByLineId,
+  setNotifyEnabled,
+} from "../src/services/user.service.js";
 import {
   calculateEta,
   getUserRouteId,
@@ -21,6 +25,8 @@ import {
   buildEtaMessages,
   buildLocationConfirmMessage,
   buildWelcomeMessage,
+  withQuickReply,
+  attachQuickReplyToLast,
 } from "../src/services/line.service.js";
 import { classifyIntent, generateRagResponse } from "../src/services/rag.service.js";
 import {
@@ -125,15 +131,89 @@ async function handleTextMessage(
 ): Promise<void> {
   const text = msg.text.trim();
 
+  // Menu aliases + help (Rich Menu / Quick Reply)
+  if (/^(說明|幫助|怎麼用|使用說明|help)$/i.test(text)) {
+    await replyMessage(replyToken, [buildWelcomeMessage()]);
+    return;
+  }
+
+  if (/^搜尋$/.test(text)) {
+    await replyMessage(replyToken, [
+      withQuickReply(
+        buildTextMessage(
+          `🔍 關鍵字搜尋（對齊官方搜尋框，更快）\n\n` +
+            `請回覆：查 路名或地標\n` +
+            `例如：\n` +
+            `• 查 中正路\n` +
+            `• 查 東門\n` +
+            `• 查 香山`
+        )
+      ),
+    ]);
+    return;
+  }
+
+  if (/^設定$/.test(text)) {
+    const prefs = await getUserPrefs(userId);
+    await replyMessage(replyToken, [
+      withQuickReply(
+        buildTextMessage(
+          `⚙️ 目前設定\n` +
+            `• 模式：${prefs.locateMode === "recommend" ? "依時間推薦" : "整天班表"}\n` +
+            `• 半徑：${prefs.radiusMeters}m\n` +
+            `• 最愛：${prefs.favorites.length} 個` +
+            (prefs.activeFavoriteId
+              ? `（追蹤中：${
+                  prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)
+                    ?.label ?? "?"
+                }）`
+              : "（追蹤住家）") +
+            `\n\n可改：\n` +
+            `• 模式 推薦｜模式 整天\n` +
+            `• 半徑 100｜半徑 200｜半徑 500\n` +
+            `• 通知 開｜通知 關`
+        )
+      ),
+    ]);
+    return;
+  }
+
+  const notifyMatch = text.match(/^通知\s*(開|關|on|off)$/i);
+  if (notifyMatch) {
+    const enabled = /開|on/i.test(notifyMatch[1]);
+    try {
+      await setNotifyEnabled(userId, enabled);
+      await replyMessage(replyToken, [
+        withQuickReply(
+          buildTextMessage(
+            enabled
+              ? "✅ 已開啟靠近推播（約 5 分鐘會提醒）"
+              : "✅ 已關閉靠近推播（仍可手動查垃圾車）"
+          )
+        ),
+      ]);
+    } catch (err) {
+      console.error("[Webhook] setNotifyEnabled failed:", err);
+      await replyMessage(replyToken, [
+        withQuickReply(
+          buildTextMessage("⚠️ 通知設定暫時無法更新，請稍後再試。")
+        ),
+      ]);
+    }
+    return;
+  }
+
   // Fast commands (beat official web forms — zero clicks)
   const radiusMatch = text.match(/^(?:半徑|range)\s*(\d{2,3})$/i);
   if (radiusMatch) {
     const radius = clampRadiusMeters(parseInt(radiusMatch[1], 10));
     const prefs = await setUserPrefs(userId, { radiusMeters: radius });
     await replyMessage(replyToken, [
-      buildTextMessage(
-        `✅ 搜尋半徑已設為 ${prefs.radiusMeters} 公尺\n` +
-          `（官方可調 50–500，預設 100；我們一樣支援，且會記住你的設定）`
+      withQuickReply(
+        buildTextMessage(
+          `✅ 搜尋半徑已設為 ${prefs.radiusMeters} 公尺\n` +
+            `（官方可調 50–500，預設 100；我們會記住你的設定）`
+        )
       ),
     ]);
     return;
@@ -146,13 +226,15 @@ async function handleTextMessage(
       token === "整天" || token === "全部" ? "all_day" : "recommend";
     const prefs = await setUserPrefs(userId, { locateMode });
     await replyMessage(replyToken, [
-      buildTextMessage(
-        `✅ 定位模式：${
-          prefs.locateMode === "recommend"
-            ? "依目前時間推薦（對齊官方「自動」）"
-            : "整天班表／距離優先（對齊官方「全部顯示」）"
-        }\n` +
-          `再傳「垃圾車」即可套用。`
+      withQuickReply(
+        buildTextMessage(
+          `✅ 定位模式：${
+            prefs.locateMode === "recommend"
+              ? "依目前時間推薦（對齊官方「自動」）"
+              : "整天班表／距離優先（對齊官方「全部顯示」）"
+          }\n` +
+            `再點選單「垃圾車」即可套用。`
+        )
       ),
     ]);
     return;
@@ -165,7 +247,9 @@ async function handleTextMessage(
     const user = await getUserByLineId(userId);
     if (!user?.home_lat || !user?.home_lng) {
       await replyMessage(replyToken, [
-        buildTextMessage("請先傳送 GPS 位置，再回覆「收藏 公司」。"),
+        withQuickReply(
+          buildTextMessage("請先點選單「定位」傳 GPS，再回覆「收藏 公司」。")
+        ),
       ]);
       return;
     }
@@ -176,10 +260,12 @@ async function handleTextMessage(
       address: label,
     });
     await replyMessage(replyToken, [
-      buildTextMessage(
-        `⭐ 已收藏「${label}」並設為追蹤點（最多 3 個）\n` +
-          `目前最愛：${prefs.favorites.map((f) => f.label).join("、")}\n` +
-          `切換：切換 ${label}｜切換 住家｜最愛`
+      withQuickReply(
+        buildTextMessage(
+          `⭐ 已收藏「${label}」並設為追蹤點（最多 3 個）\n` +
+            `目前最愛：${prefs.favorites.map((f) => f.label).join("、")}\n` +
+            `切換：切換 ${label}｜切換 住家｜最愛`
+        )
       ),
     ]);
     return;
@@ -189,8 +275,10 @@ async function handleTextMessage(
     const prefs = await getUserPrefs(userId);
     if (prefs.favorites.length === 0) {
       await replyMessage(replyToken, [
-        buildTextMessage(
-          "尚未收藏地點。傳送 GPS 後回覆「收藏 公司」即可（最多 3 個，優於官方單一我的最愛網頁流程）。"
+        withQuickReply(
+          buildTextMessage(
+            "尚未收藏地點。先點選單「定位」傳 GPS，再回覆「收藏 公司」（最多 3 個）。"
+          )
         ),
       ]);
       return;
@@ -199,11 +287,13 @@ async function handleTextMessage(
       ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)?.label
       : "住家";
     await replyMessage(replyToken, [
-      buildTextMessage(
-        `⭐ 我的最愛\n` +
-          prefs.favorites.map((f, i) => `${i + 1}. ${f.label}`).join("\n") +
-          `\n目前追蹤：${active ?? "住家"}\n` +
-          `指令：切換 公司｜切換 住家`
+      withQuickReply(
+        buildTextMessage(
+          `⭐ 我的最愛\n` +
+            prefs.favorites.map((f, i) => `${i + 1}. ${f.label}`).join("\n") +
+            `\n目前追蹤：${active ?? "住家"}\n` +
+            `指令：切換 公司｜切換 住家`
+        )
       ),
     ]);
     return;
@@ -215,7 +305,9 @@ async function handleTextMessage(
     if (label === "住家" || label === "家") {
       await clearActiveFavorite(userId);
       await replyMessage(replyToken, [
-        buildTextMessage("✅ 已切回住家位置追蹤。傳「垃圾車」查看 ETA。"),
+        withQuickReply(
+          buildTextMessage("✅ 已切回住家位置追蹤。點選單「垃圾車」查看 ETA。")
+        ),
       ]);
       return;
     }
@@ -223,18 +315,24 @@ async function handleTextMessage(
     const fav = prefs.favorites.find((f) => f.label === label);
     if (!fav) {
       await replyMessage(replyToken, [
-        buildTextMessage(`找不到最愛「${label}」。先傳「最愛」查看清單。`),
+        withQuickReply(
+          buildTextMessage(`找不到最愛「${label}」。先點選單「最愛」查看清單。`)
+        ),
       ]);
       return;
     }
     await setUserPrefs(userId, { activeFavoriteId: fav.id });
     await replyMessage(replyToken, [
-      buildTextMessage(`✅ 已切換追蹤「${fav.label}」。傳「垃圾車」或「班表」。`),
+      withQuickReply(
+        buildTextMessage(
+          `✅ 已切換追蹤「${fav.label}」。點選單「垃圾車」或「班表」。`
+        )
+      ),
     ]);
     return;
   }
 
-  const searchMatch = text.match(/^(?:查|搜尋|找)\s*(.+)$/);
+  const searchMatch = text.match(/^(?:查|搜尋|找)\s+(.+)$/);
   if (searchMatch) {
     const keyword = searchMatch[1].trim();
     const coords = await getActiveCoords(userId);
@@ -243,7 +341,7 @@ async function handleTextMessage(
       coords?.lat,
       coords?.lng
     );
-    await replyMessage(replyToken, [buildTextMessage(result)]);
+    await replyMessage(replyToken, [withQuickReply(buildTextMessage(result))]);
     return;
   }
 
@@ -251,7 +349,9 @@ async function handleTextMessage(
     const coords = await getActiveCoords(userId);
     if (!coords) {
       await replyMessage(replyToken, [
-        buildTextMessage("請先傳送 GPS，或傳「查 路名」搜尋班表。"),
+        withQuickReply(
+          buildTextMessage("請先點選單「定位」傳 GPS，或「搜尋」查路名班表。")
+        ),
       ]);
       return;
     }
@@ -260,7 +360,7 @@ async function handleTextMessage(
       locateMode: prefs.locateMode,
       radiusMeters: prefs.radiusMeters,
     });
-    await replyMessage(replyToken, [buildTextMessage(card)]);
+    await replyMessage(replyToken, [withQuickReply(buildTextMessage(card))]);
     return;
   }
 
@@ -275,10 +375,12 @@ async function handleTextMessage(
     const coords = await getActiveCoords(userId);
     if (!coords) {
       await replyMessage(replyToken, [
-        buildTextMessage(
-          "⚠️ 您還沒有設定位置！\n\n" +
-            "請點選「+」→「位置」傳送 GPS。\n" +
-            "也可先「查 路名」搜尋班表。"
+        withQuickReply(
+          buildTextMessage(
+            "⚠️ 您還沒有設定位置！\n\n" +
+              "請點底部選單「📍 定位」，或點「+」→「位置」。\n" +
+              "也可先點「🔍 搜尋」查路名班表。"
+          )
         ),
       ]);
       return;
@@ -296,28 +398,18 @@ async function handleTextMessage(
     const messages = buildEtaMessages(eta);
     await replyMessage(
       replyToken,
-      prefix ? [prefix, ...messages] : messages
+      attachQuickReplyToLast(prefix ? [prefix, ...messages] : messages)
     );
     return;
   }
 
   if (intent === "rag") {
     const answer = await generateRagResponse(text);
-    await replyMessage(replyToken, [buildTextMessage(answer)]);
+    await replyMessage(replyToken, [withQuickReply(buildTextMessage(answer))]);
     return;
   }
 
-  await replyMessage(replyToken, [
-    buildTextMessage(
-      "🤔 可以這樣用（每項都比官方網頁快）：\n" +
-        "• 垃圾車 → 即時 ETA＋推播\n" +
-        "• 班表 → 整週清運日\n" +
-        "• 查 中正路 → 關鍵字搜尋\n" +
-        "• 半徑 200／模式 推薦｜整天\n" +
-        "• 收藏 公司／切換 公司／最愛\n" +
-        "• 傳送 GPS → 綁定住家"
-    ),
-  ]);
+  await replyMessage(replyToken, [buildWelcomeMessage()]);
 }
 
 async function handleFollowEvent(
