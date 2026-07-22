@@ -122,7 +122,19 @@ async function replyEtaNow(
   const prefixParts: string[] = [];
   if (notice) prefixParts.push(notice);
   if (coords.label !== "住家") {
-    prefixParts.push(`📍 現在查的是：${coords.label}`);
+    // Prefer nickname + address when tracking a favorite
+    const prefs = await getUserPrefs(userId);
+    const fav = prefs.activeFavoriteId
+      ? prefs.favorites.find((f) => f.id === prefs.activeFavoriteId)
+      : null;
+    if (fav) {
+      prefixParts.push(
+        `📍 現在查的是：${favoriteDisplayName(fav)}` +
+          `\n${fav.address || fav.label}`
+      );
+    } else {
+      prefixParts.push(`📍 現在查的是：${coords.label}`);
+    }
   }
   const prefix =
     prefixParts.length > 0
@@ -400,7 +412,7 @@ async function handleTextMessage(
         withQuickReply(
           buildTextMessage(
             `✅ 已加上暱稱「${text.trim().slice(0, 12)}」\n` +
-              `地址仍是：${spot?.address || spot?.label || ""}`
+              `📍 地址：${spot?.address || spot?.label || ""}`
           )
         )
       );
@@ -459,7 +471,10 @@ async function handleTextMessage(
     }
     await setPendingNickname(userId, favoriteId);
     await replyMessage(replyToken, [
-      buildAskNicknameTextMessage(favoriteDisplayName(spot)),
+      buildAskNicknameTextMessage(
+        favoriteDisplayName(spot),
+        spot.address || spot.label
+      ),
     ]);
     return;
   }
@@ -529,10 +544,11 @@ async function handleTextMessage(
       return;
     }
     await setUserPrefs(userId, { activeFavoriteId: fav.id });
+    const addr = fav.address || fav.label;
     await replyEtaNow(
       userId,
       replyToken,
-      `✅ 已換成「${favoriteDisplayName(fav)}」`
+      `✅ 已換成「${favoriteDisplayName(fav)}」\n📍 ${addr}`
     );
     return;
   }
@@ -566,7 +582,7 @@ async function handleTextMessage(
     await replyEtaNow(
       userId,
       replyToken,
-      `✅ 已換成「${favoriteDisplayName(fav)}」`
+      `✅ 已換成「${favoriteDisplayName(fav)}」\n📍 ${fav.address || fav.label}`
     );
     return;
   }
@@ -594,7 +610,7 @@ async function handleTextMessage(
     await replyEtaNow(
       userId,
       replyToken,
-      `✅ 已換成「${favoriteDisplayName(fav)}」`
+      `✅ 已換成「${favoriteDisplayName(fav)}」\n📍 ${fav.address || fav.label}`
     );
     return;
   }

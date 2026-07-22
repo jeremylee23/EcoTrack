@@ -560,7 +560,7 @@ export function buildWelcomeMessage(): TextMessage {
 }
 
 /**
- * One-tap favorites: address-based places + optional nickname.
+ * One-tap favorites: nickname primary, address always visible underneath.
  */
 export function buildFavoritesMenuFlex(options: {
   favorites: Array<{
@@ -575,33 +575,74 @@ export function buildFavoritesMenuFlex(options: {
   const { favorites, activeId } = options;
   const isHome = !activeId;
 
-  const homeBtn = {
-    type: "button" as const,
-    style: (isHome ? "primary" : "secondary") as "primary" | "secondary",
-    color: isHome ? "#059669" : undefined,
-    height: "md" as const,
-    action: {
-      type: "message" as const,
-      label: isHome ? "🏠 住家（使用中）" : "🏠 住家",
-      text: "用住家",
-    },
+  const homeBlock = {
+    type: "box" as const,
+    layout: "vertical" as const,
+    spacing: "sm" as const,
+    margin: "md" as const,
+    contents: [
+      {
+        type: "button" as const,
+        style: (isHome ? "primary" : "secondary") as "primary" | "secondary",
+        color: isHome ? "#059669" : undefined,
+        height: "md" as const,
+        action: {
+          type: "message" as const,
+          label: isHome ? "🏠 住家（使用中）" : "🏠 住家",
+          text: "用住家",
+        },
+      },
+    ],
   };
 
-  const favBtns = favorites.map((f) => {
+  const favBlocks = favorites.map((f) => {
     const active = f.id === activeId;
-    const name = f.nickname?.trim() || f.label;
-    // LINE button label max ~40; keep short
-    const btnLabel = active ? `${name}（使用中）` : name;
+    const title = f.nickname?.trim() || f.label;
+    const addressLine =
+      f.address?.trim() ||
+      (f.nickname?.trim() ? f.label : f.address !== f.label ? f.label : null);
+
     return {
-      type: "button" as const,
-      style: (active ? "primary" : "secondary") as "primary" | "secondary",
-      color: active ? "#059669" : undefined,
-      height: "md" as const,
-      action: {
-        type: "message" as const,
-        label: btnLabel.slice(0, 36),
-        text: `用地點:${f.id}`,
-      },
+      type: "box" as const,
+      layout: "vertical" as const,
+      spacing: "sm" as const,
+      margin: "md" as const,
+      paddingAll: "12px" as const,
+      backgroundColor: active ? "#ecfdf5" : "#f9fafb",
+      cornerRadius: "md" as const,
+      contents: [
+        {
+          type: "text" as const,
+          text: active ? `${title}（使用中）` : title,
+          weight: "bold" as const,
+          size: "md" as const,
+          color: "#111827",
+          wrap: true,
+        },
+        ...(addressLine
+          ? [
+              {
+                type: "text" as const,
+                text: `📍 ${addressLine}`,
+                size: "sm" as const,
+                color: "#4b5563",
+                wrap: true,
+              },
+            ]
+          : []),
+        {
+          type: "button" as const,
+          style: (active ? "primary" : "secondary") as "primary" | "secondary",
+          color: active ? "#059669" : undefined,
+          height: "sm" as const,
+          margin: "sm" as const,
+          action: {
+            type: "message" as const,
+            label: active ? "目前使用這個" : "選這個查車",
+            text: `用地點:${f.id}`,
+          },
+        },
+      ],
     };
   });
 
@@ -609,7 +650,7 @@ export function buildFavoritesMenuFlex(options: {
     favorites.length > 0
       ? {
           type: "text" as const,
-          text: "有暱稱會顯示暱稱；沒有就顯示地址。地址一直都在。",
+          text: "大字是暱稱，下面一定會附地址。",
           size: "sm" as const,
           color: "#6b7280",
           wrap: true,
@@ -645,20 +686,15 @@ export function buildFavoritesMenuFlex(options: {
           },
           {
             type: "text",
-            text: "點一下就換成那個地方，並立刻查車。",
+            text: "點「選這個查車」就會換成該地並立刻查車。",
             size: "md",
             color: "#4b5563",
             wrap: true,
           },
           nickHint,
           { type: "separator", margin: "md" },
-          {
-            type: "box",
-            layout: "vertical",
-            spacing: "md",
-            margin: "lg",
-            contents: [homeBtn, ...favBtns],
-          },
+          homeBlock,
+          ...favBlocks,
         ],
       },
       footer: {
@@ -848,6 +884,7 @@ export function buildPickNicknameTargetFlex(
     id: string;
     label: string;
     nickname?: string;
+    address?: string;
   }>
 ): FlexMessage {
   return {
@@ -870,7 +907,7 @@ export function buildPickNicknameTargetFlex(
           },
           {
             type: "text",
-            text: "暱稱像備註（兒子家），地址還在。",
+            text: "暱稱是備註；地址會一直顯示在下面。",
             size: "md",
             color: "#4b5563",
             wrap: true,
@@ -880,17 +917,46 @@ export function buildPickNicknameTargetFlex(
             layout: "vertical",
             spacing: "md",
             margin: "lg",
-            contents: favorites.map((f) => ({
-              type: "button" as const,
-              style: "primary" as const,
-              color: "#0f766e",
-              height: "md" as const,
-              action: {
-                type: "message" as const,
-                label: (f.nickname || f.label).slice(0, 36),
-                text: `暱稱地點:${f.id}`,
-              },
-            })),
+            contents: favorites.map((f) => {
+              const title = f.nickname?.trim() || f.label;
+              const addr = f.address?.trim() || f.label;
+              return {
+                type: "box" as const,
+                layout: "vertical" as const,
+                spacing: "xs" as const,
+                paddingAll: "10px" as const,
+                backgroundColor: "#f0fdfa",
+                cornerRadius: "md" as const,
+                contents: [
+                  {
+                    type: "text" as const,
+                    text: title,
+                    weight: "bold" as const,
+                    size: "md" as const,
+                    wrap: true,
+                  },
+                  {
+                    type: "text" as const,
+                    text: `📍 ${addr}`,
+                    size: "sm" as const,
+                    color: "#4b5563",
+                    wrap: true,
+                  },
+                  {
+                    type: "button" as const,
+                    style: "primary" as const,
+                    color: "#0f766e",
+                    height: "sm" as const,
+                    margin: "sm" as const,
+                    action: {
+                      type: "message" as const,
+                      label: "幫這裡加暱稱",
+                      text: `暱稱地點:${f.id}`,
+                    },
+                  },
+                ],
+              };
+            }),
           },
         ],
       },
@@ -898,11 +964,15 @@ export function buildPickNicknameTargetFlex(
   };
 }
 
-export function buildAskNicknameTextMessage(placeLabel: string): TextMessage {
+export function buildAskNicknameTextMessage(
+  placeLabel: string,
+  address?: string
+): TextMessage {
   return buildTextMessage(
     `請打上暱稱（家人可代打），例如：兒子家、診所\n` +
-      `對象：${placeLabel}\n\n` +
-      `直接傳文字即可；不想加就傳「不用了」。`
+      `對象：${placeLabel}` +
+      (address ? `\n地址：${address}` : "") +
+      `\n\n直接傳文字即可；不想加就傳「不用了」。`
   );
 }
 
@@ -1047,9 +1117,9 @@ export function buildNearbyStopsFlex(guide: {
   };
 }
 
-/** Delete picker */
+/** Delete picker — show nickname + address */
 export function buildDeleteFavoriteFlex(
-  favorites: Array<{ id: string; label: string; nickname?: string }>
+  favorites: Array<{ id: string; label: string; nickname?: string; address?: string }>
 ): FlexMessage {
   return {
     type: "flex",
@@ -1074,17 +1144,46 @@ export function buildDeleteFavoriteFlex(
             layout: "vertical",
             spacing: "md",
             margin: "lg",
-            contents: favorites.map((f) => ({
-              type: "button" as const,
-              style: "primary" as const,
-              color: "#dc2626",
-              height: "md" as const,
-              action: {
-                type: "message" as const,
-                label: `刪除 ${f.nickname || f.label}`.slice(0, 36),
-                text: `刪地點:${f.id}`,
-              },
-            })),
+            contents: favorites.map((f) => {
+              const title = f.nickname?.trim() || f.label;
+              const addr = f.address?.trim() || f.label;
+              return {
+                type: "box" as const,
+                layout: "vertical" as const,
+                spacing: "xs" as const,
+                paddingAll: "10px" as const,
+                backgroundColor: "#fef2f2",
+                cornerRadius: "md" as const,
+                contents: [
+                  {
+                    type: "text" as const,
+                    text: title,
+                    weight: "bold" as const,
+                    size: "md" as const,
+                    wrap: true,
+                  },
+                  {
+                    type: "text" as const,
+                    text: `📍 ${addr}`,
+                    size: "sm" as const,
+                    color: "#4b5563",
+                    wrap: true,
+                  },
+                  {
+                    type: "button" as const,
+                    style: "primary" as const,
+                    color: "#dc2626",
+                    height: "sm" as const,
+                    margin: "sm" as const,
+                    action: {
+                      type: "message" as const,
+                      label: "刪除這裡",
+                      text: `刪地點:${f.id}`,
+                    },
+                  },
+                ],
+              };
+            }),
           },
         ],
       },
