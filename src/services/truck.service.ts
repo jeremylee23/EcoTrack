@@ -24,7 +24,10 @@ import type {
   HccgCleanPoint,
   HccgCleanPointData,
 } from "../types/index.js";
-import { getNextScheduledArrival } from "../utils/time.util.js";
+import {
+  getNextScheduledArrival,
+  SCHEDULE_LATE_GRACE_MINUTES,
+} from "../utils/time.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -48,14 +51,17 @@ const USER_ROUTE_KEY = (userId: string) => `user_route:${userId}`;
 const POINTS_CACHE_KEY = (lat: number, lng: number) =>
   `points_cache:${lat.toFixed(4)}:${lng.toFixed(4)}`;
 
-// Stale threshold: Redis data older than 6 hours is considered "today unavailable"
-// (Truck ran yesterday, GPS off now — don't mislead user into thinking it's idle)
+// Stale threshold: GPS older than 6 hours is considered "today unavailable"
+// (Truck ran earlier / yesterday, GPS off now — don't mislead with fake ETAs)
 const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+// Soft warning: GPS older than this still usable for ETA, but UI should warn.
+const STALE_WARN_MS = 15 * 60 * 1000;
 
 // Official point query radii. Start narrow and widen to match the government UX.
 const POINT_SEARCH_RADII_M = [120, 200, 300, 500] as const;
 const DEFAULT_GARBAGE_DAYS = [1, 2, 4, 5, 6] as const;
 const OFFICIAL_LIVE_STATUS = "1";
+const CAR_STATUS_DONE = "1";
 
 interface NearbyPointCandidate {
   point: HccgCleanPoint;
@@ -82,14 +88,19 @@ function getTaiwanMinutesOfDay(): number {
   return now.getUTCHours() * 60 + now.getUTCMinutes();
 }
 
-function hasServiceToday(daysString: string | null | undefined): boolean {
-  if (!daysString) return false;
-
+function hasServiceToday(
+  daysString: string | null | undefined,
+  defaultDays?: readonly number[]
+): boolean {
   const weekday = getTaiwanWeekday();
-  return daysString
+  const parsed = (daysString ?? "")
     .split(",")
     .map((value) => parseInt(value, 10))
-    .some((value) => value === weekday);
+    .filter((value) => !Number.isNaN(value) && value >= 1 && value <= 7);
+
+  if (parsed.length > 0) return parsed.includes(weekday);
+  if (defaultDays && defaultDays.length > 0) return defaultDays.includes(weekday);
+  return false;
 }
 
 function getMinutesUntilScheduled(scheduledTime: string | null): number | null {
@@ -101,18 +112,26 @@ function getMinutesUntilScheduled(scheduledTime: string | null): number | null {
   return hours * 60 + minutes - getTaiwanMinutesOfDay();
 }
 
+/**
+ * Prefer the government's own live estimate whenever it is present.
+ * Empty trashDay/recycleDay should not block a live estimate; only an
+ * explicit "not today" day list should.
+ */
 function getOfficialEtaMinutes(
   point: HccgCleanPoint,
   carType: "0" | "1"
 ): number | undefined {
-  const isToday = carType === "0"
-    ? hasServiceToday(point.trashDay)
-    : hasServiceToday(point.recycleDay);
-
-  if (!isToday || point.status !== OFFICIAL_LIVE_STATUS) return undefined;
+  if (point.status !== OFFICIAL_LIVE_STATUS) return undefined;
 
   const estimateSeconds = parseInt(point.estimate, 10);
   if (Number.isNaN(estimateSeconds) || estimateSeconds < 0) return undefined;
+
+  const dayField = carType === "0" ? point.trashDay : point.recycleDay;
+  const defaultDays = carType === "0" ? DEFAULT_GARBAGE_DAYS : undefined;
+  const rawDays = dayField?.trim();
+
+  // Explicit day list that excludes today → not this vehicle's service.
+  if (rawDays && !hasServiceToday(dayField, defaultDays)) return undefined;
 
   return Math.max(1, Math.ceil(estimateSeconds / 60));
 }
@@ -133,7 +152,7 @@ function buildPointCandidate(
     minutesUntilScheduled: getMinutesUntilScheduled(scheduledTime),
     garbageEtaMinutes: getOfficialEtaMinutes(point, "0"),
     recyclingEtaMinutes: getOfficialEtaMinutes(point, "1"),
-    hasTodayGarbage: hasServiceToday(point.trashDay),
+    hasTodayGarbage: hasServiceToday(point.trashDay, DEFAULT_GARBAGE_DAYS),
     hasTodayRecycling: hasServiceToday(point.recycleDay),
   };
 }
@@ -141,8 +160,10 @@ function buildPointCandidate(
 function getCandidateTimePenalty(candidate: NearbyPointCandidate): number {
   const diff = candidate.minutesUntilScheduled;
   if (diff === null) return 3000;
-  if (diff < -90) return 6000 + Math.abs(diff);
-  if (diff < -30) return 2000 + Math.abs(diff);
+  // Far past the late-grace window → heavily deprioritize.
+  if (diff < -SCHEDULE_LATE_GRACE_MINUTES) return 6000 + Math.abs(diff);
+  // Mildly late (common for Hsinchu trucks): keep as a strong candidate.
+  if (diff < 0) return Math.abs(diff);
   if (diff > 240) return 1000 + diff;
   return Math.abs(diff);
 }
@@ -304,6 +325,24 @@ export async function resolveNearestRoute(
   };
 }
 
+function getTruckAgeMs(truck: TruckLiveData): number {
+  const updatedAt = new Date(truck.updated_at).getTime();
+  if (Number.isNaN(updatedAt)) return Number.POSITIVE_INFINITY;
+  return Date.now() - updatedAt;
+}
+
+/**
+ * Drops GPS that cannot produce a trustworthy live ETA.
+ * HCCG often keeps returning yesterday's last ping with seq=-1 after service ends.
+ */
+function sanitizeLiveTruck(truck: TruckLiveData | null): TruckLiveData | null {
+  if (!truck) return null;
+  if (getTruckAgeMs(truck) >= STALE_THRESHOLD_MS) return null;
+  if (truck.heading_to_stop_sequence < 0) return null;
+  if (truck.status === CAR_STATUS_DONE) return null;
+  return truck;
+}
+
 async function getRecentTruckFallback(
   routeId: string,
   carType: "0" | "1"
@@ -313,10 +352,7 @@ async function getRecentTruckFallback(
       (await getTruckLiveData(routeId))
     : await getTruckLiveData(`${routeId}:1`);
 
-  if (!fallback) return null;
-
-  const ageMs = Date.now() - new Date(fallback.updated_at).getTime();
-  return ageMs < STALE_THRESHOLD_MS ? fallback : null;
+  return sanitizeLiveTruck(fallback);
 }
 
 function estimateEtaFromTruck(
@@ -425,6 +461,13 @@ export async function calculateEta(
     return { garbage: null, recycling: null };
   });
 
+  // Official API keeps echoing dead GPS (often seq=-1) after runs end.
+  // Sanitize before any ETA math so we don't invent confident-but-wrong ETAs.
+  truckData = {
+    garbage: sanitizeLiveTruck(truckData.garbage),
+    recycling: sanitizeLiveTruck(truckData.recycling),
+  };
+
   if (!truckData.garbage) {
     truckData.garbage = await getRecentTruckFallback(routeId, "0");
   }
@@ -447,19 +490,34 @@ export async function calculateEta(
       ? estimateEtaFromTruck(recyclingTruck, stopLat, stopLng, targetSequence)
       : undefined);
 
+  const liveTruckForStale = garbageTruck ?? recyclingTruck;
+  const staleMinutes = liveTruckForStale
+    ? Math.max(0, Math.round(getTruckAgeMs(liveTruckForStale) / 60_000))
+    : 0;
+  const isStale = liveTruckForStale
+    ? getTruckAgeMs(liveTruckForStale) >= STALE_WARN_MS
+    : false;
+
+  // Only mark "passed" with hard proof:
+  // 1) Live GPS sequence already past this stop, or
+  // 2) No live signal AND schedule is beyond the late-grace window (trucks are often 30–90 min late).
+  // Never treat "30 minutes past timetable" alone as passed — that was causing false
+  // 「今日無班次或已過站」 while the truck was still approaching.
   const isGarbagePassed =
     candidate.garbageEtaMinutes === undefined &&
     (garbageTruck
       ? garbageTruck.heading_to_stop_sequence > targetSequence
-      : candidate.minutesUntilScheduled !== null &&
-        candidate.minutesUntilScheduled < -30);
+      : !candidate.hasTodayGarbage ||
+        (candidate.minutesUntilScheduled !== null &&
+          candidate.minutesUntilScheduled < -SCHEDULE_LATE_GRACE_MINUTES));
 
   const isRecyclePassed =
     candidate.recyclingEtaMinutes === undefined &&
     (recyclingTruck
       ? recyclingTruck.heading_to_stop_sequence > targetSequence
-      : candidate.minutesUntilScheduled !== null &&
-        candidate.minutesUntilScheduled < -30);
+      : !candidate.hasTodayRecycling ||
+        (candidate.minutesUntilScheduled !== null &&
+          candidate.minutesUntilScheduled < -SCHEDULE_LATE_GRACE_MINUTES));
 
   const nextGarbageInfo = getNextScheduledArrival(
     point.trashDay,
@@ -488,6 +546,9 @@ export async function calculateEta(
     const historicalText = historicalReference
       ? `\n📊 歷史平均：約 ${historicalReference}`
       : "";
+    const reasonText = isGarbagePassed || isRecyclePassed
+      ? "目前判斷今日此站已過站或尚無可用即時訊號"
+      : "今日此站無班次或尚無可用即時訊號";
 
     return {
       found: true,
@@ -507,8 +568,8 @@ export async function calculateEta(
       isRecyclePassed,
       message:
         `📍 最近清運點：${stopName}\n` +
-        `🕐 官方表定：${formattedTime}${historicalText}` +
-        `${nextGarbageText}${nextRecycleText}`,
+        `🕐 官方表定：${formattedTime}${historicalText}\n` +
+        `⚠️ ${reasonText}。${nextGarbageText}${nextRecycleText}`,
     };
   }
 
@@ -571,12 +632,16 @@ export async function calculateEta(
       ? `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘`
       : nextGarbageInfo && !nextGarbageInfo.isToday
         ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}`
-        : "⚠️ 垃圾車目前沒有可用的即時 ETA",
+        : nextGarbageInfo?.isToday
+          ? `🚛 垃圾車：今日表定 ${formattedTime}，目前尚無即時訊號（常會延誤，請稍後再查）`
+          : "⚠️ 垃圾車目前沒有可用的即時 ETA",
     recyclingEtaMinutes !== undefined
       ? `♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘`
       : nextRecycleInfo && !nextRecycleInfo.isToday
         ? `♻️ 下次回收車：${nextRecycleInfo.dateStr}`
-        : null,
+        : nextRecycleInfo?.isToday
+          ? `♻️ 回收車：今日表定 ${formattedTime}，目前尚無即時訊號`
+          : null,
   ].filter((line): line is string => Boolean(line));
 
   return {
@@ -604,9 +669,9 @@ export async function calculateEta(
     isGarbagePassed,
     isRecyclePassed,
     message: messageLines.join("\n"),
-    isStale: false,
-    staleMinutes: 0,
-  } as EtaResult & { isStale?: boolean; staleMinutes?: number };
+    isStale,
+    staleMinutes,
+  };
 }
 
 async function getHistoricalAverage(routeId: string, stopId: number): Promise<string | undefined> {

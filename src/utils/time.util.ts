@@ -1,12 +1,24 @@
+/**
+ * How late a truck may be past the official schedule before we treat the stop
+ * as "passed for today". Hsinchu garbage trucks are frequently 30–90+ minutes late,
+ * so a tight threshold causes false "已過站 / 今日無班次" while the truck is still coming.
+ */
+export const SCHEDULE_LATE_GRACE_MINUTES = 120;
+
 export function getNextScheduledArrival(
   daysString: string | null, // e.g., "1,2,4,5,6" (1=Mon, 7=Sun)
   scheduledTime: string | null, // e.g., "18:30"
   hasPassedToday: boolean = false,
-  defaultDays?: number[]
+  defaultDays?: number[],
+  lateGraceMinutes: number = SCHEDULE_LATE_GRACE_MINUTES
 ): { dateStr: string; isToday: boolean } | null {
-  if (!daysString || !scheduledTime) return null;
+  if (!scheduledTime) return null;
 
-  let validDays = daysString.split(",").map(Number).filter(n => !isNaN(n) && n >= 1 && n <= 7);
+  let validDays = (daysString ?? "")
+    .split(",")
+    .map(Number)
+    .filter((n) => !isNaN(n) && n >= 1 && n <= 7);
+
   if (validDays.length === 0) {
     if (defaultDays && defaultDays.length > 0) {
       validDays = defaultDays;
@@ -21,7 +33,7 @@ export function getNextScheduledArrival(
   const now = new Date();
   // Adjust to Taiwan time (UTC+8)
   const taiwanTime = new Date(now.getTime() + 8 * 3600000);
-  
+
   // getUTCDay() on taiwanTime works as local day if we treat UTC methods as local
   let currentDay = taiwanTime.getUTCDay();
   if (currentDay === 0) currentDay = 7; // Convert Sunday(0) to 7
@@ -42,19 +54,15 @@ export function getNextScheduledArrival(
           // Already passed, so skip to next valid day
           continue;
         }
-        
-        // If we haven't officially passed it via GPS sequence, check time buffer
-        // Let's say if it's 60+ minutes past scheduled time and no GPS, it's considered passed.
-        // We'll let the caller pass `hasPassedToday` if GPS sequence is past.
-        // But if caller didn't pass true, we check strict time.
-        if (currentMinutes > scheduledMinutes + 60) {
-          // Too late today
+
+        // Without live GPS proof of passage, keep today open through the late-grace window.
+        if (currentMinutes > scheduledMinutes + lateGraceMinutes) {
           continue;
         }
-        
+
         return {
           dateStr: `今日 ${scheduledTime}`,
-          isToday: true
+          isToday: true,
         };
       }
 
@@ -62,10 +70,10 @@ export function getNextScheduledArrival(
       const targetDate = new Date(taiwanTime.getTime() + offset * 24 * 3600000);
       const mm = (targetDate.getUTCMonth() + 1).toString().padStart(2, "0");
       const dd = targetDate.getUTCDate().toString().padStart(2, "0");
-      
+
       return {
         dateStr: `${mm}/${dd}(${dayNames[checkDay]}) ${scheduledTime}`,
-        isToday: false
+        isToday: false,
       };
     }
   }

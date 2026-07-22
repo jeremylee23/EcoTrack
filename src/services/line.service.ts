@@ -126,7 +126,9 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   ? (eta.isGarbagePassed ? `已過站，下次 ${eta.nextGarbageDate}` : `下次 ${eta.nextGarbageDate}`)
                   : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
                     ? "即將抵達" 
-                    : (eta.etaMinutes !== undefined ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)` : "未知")),
+                    : (eta.etaMinutes !== undefined
+                      ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)`
+                      : (eta.scheduledTime ? `表定 ${eta.scheduledTime}（等待訊號）` : "未知"))),
                 weight: "bold",
                 size: eta.nextGarbageDate ? "sm" : "md",
                 color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6"),
@@ -147,7 +149,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   ? (eta.isRecyclePassed ? `已過站，下次 ${eta.nextRecycleDate}` : `下次 ${eta.nextRecycleDate}`)
                   : (eta.recyclingEtaMinutes !== undefined 
                     ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
-                    : "無資料"),
+                    : (eta.scheduledTime && !eta.nextGarbageDate ? `表定 ${eta.scheduledTime}` : "無資料")),
                 weight: "bold",
                 size: eta.nextRecycleDate ? "sm" : "md",
                 color: eta.nextRecycleDate ? "#9ca3af" : (eta.recyclingEtaMinutes !== undefined && eta.recyclingEtaMinutes <= 1 ? "#ef4444" : "#10b981"),
