@@ -248,6 +248,27 @@ export default async function handler(
         }
       } catch (err) {
         console.error("[Webhook] Handler error:", err);
+
+        // Always try to tell the user something went wrong — silent failure
+        // is what previously looked like "LINE 無反應".
+        try {
+          const replyToken =
+            event.type === "follow"
+              ? (event as FollowEvent).replyToken
+              : event.type === "message"
+                ? (event as MessageEvent).replyToken
+                : undefined;
+          if (replyToken) {
+            await replyMessage(replyToken, [
+              buildTextMessage(
+                "⚠️ 系統暫時無法完成這次查詢（可能是資料庫或即時訊號異常）。\n" +
+                  "請稍後再試一次；若持續發生，多半是後端連線問題，我們會盡快恢復。"
+              ),
+            ]);
+          }
+        } catch (replyErr) {
+          console.error("[Webhook] Failed to send error reply:", replyErr);
+        }
       }
     })
   );

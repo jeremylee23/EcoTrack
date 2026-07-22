@@ -174,6 +174,12 @@ export interface EtaResult {
   historicalAvgTime?: string;
   isStale?: boolean;
   staleMinutes?: number;
+  /** Where the garbage ETA came from */
+  garbageEtaSource?: "official" | "estimated";
+  /** Where the recycling ETA came from */
+  recyclingEtaSource?: "official" | "estimated";
+  /** True when we switched to a nearby alternate route with live trucks */
+  usedAlternateRoute?: boolean;
 }
 
 // ── LINE Event types (minimal, extends @line/bot-sdk) ────────

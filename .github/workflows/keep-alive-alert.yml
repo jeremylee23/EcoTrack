@@ -1,0 +1,53 @@
+name: Keep-alive Failure Alert
+
+on:
+  workflow_run:
+    workflows: ["Keep Supabase Alive"]
+    types: [completed]
+
+jobs:
+  alert:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update GitHub issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🚨 Supabase keep-alive failed';
+            const body = [
+              'Keep Supabase Alive workflow failed.',
+              '',
+              `Run: ${context.payload.workflow_run.html_url}`,
+              '',
+              'Likely causes:',
+              '- Supabase Free project paused / unreachable',
+              '- Vercel /api/health degraded (database != connected)',
+              '',
+              'Action: open Supabase dashboard → Resume project, then re-run the workflow.',
+            ].join('\n');
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'keep-alive',
+              per_page: 5,
+            });
+
+            if (issues.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: `Another failure: ${context.payload.workflow_run.html_url}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['keep-alive', 'ops'],
+              });
+            }

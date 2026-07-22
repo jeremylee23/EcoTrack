@@ -24,10 +24,14 @@ import type {
   HccgCleanPoint,
   HccgCleanPointData,
 } from "../types/index.js";
+import { getNextScheduledArrival, SCHEDULE_LATE_GRACE_MINUTES } from "../utils/time.util.js";
 import {
-  getNextScheduledArrival,
-  SCHEDULE_LATE_GRACE_MINUTES,
-} from "../utils/time.util.js";
+  applyEtaBias,
+  clampEtaBiasMinutes,
+  isSchedulePastGrace,
+  isSequencePastStop,
+  type EtaSource,
+} from "../utils/eta-policy.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
@@ -62,6 +66,8 @@ const POINT_SEARCH_RADII_M = [120, 200, 300, 500] as const;
 const DEFAULT_GARBAGE_DAYS = [1, 2, 4, 5, 6] as const;
 const OFFICIAL_LIVE_STATUS = "1";
 const CAR_STATUS_DONE = "1";
+// When primary route has no live signal, try other nearby stops within this radius.
+const ALT_ROUTE_RADIUS_M = 100;
 
 interface NearbyPointCandidate {
   point: HccgCleanPoint;
@@ -283,14 +289,13 @@ async function fetchNearbyPointsCached(
 }
 
 /**
- * Resolves the single best nearby clean point for a coordinate using the same
- * ranking as the ETA flow (official ETA → today's service → schedule → distance).
- * Shared by calculateEta and route-switch detection so both agree on the route.
+ * Resolves ranked nearby clean points for a coordinate.
+ * Shared by calculateEta (incl. alt-route fallback) and route-switch detection.
  */
-async function selectNearbyCandidate(
+async function selectNearbyCandidates(
   userLat: number,
   userLng: number
-): Promise<NearbyPointCandidate | null> {
+): Promise<NearbyPointCandidate[]> {
   let nearbyPoints: HccgCleanPoint[] = [];
 
   try {
@@ -299,12 +304,49 @@ async function selectNearbyCandidate(
     console.error("[TruckService] Failed to fetch nearby points:", error);
   }
 
-  if (nearbyPoints.length === 0) return null;
+  if (nearbyPoints.length === 0) return [];
 
+  return nearbyPoints
+    .map((point) => buildPointCandidate(userLat, userLng, point))
+    .sort(comparePointCandidates);
+}
+
+async function selectNearbyCandidate(
+  userLat: number,
+  userLng: number
+): Promise<NearbyPointCandidate | null> {
+  const candidates = await selectNearbyCandidates(userLat, userLng);
+  return candidates[0] ?? null;
+}
+
+async function loadLiveTrucksForRoute(routeId: string): Promise<{
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}> {
+  let truckData = await syncSingleTruckFromHccg(routeId).catch((error) => {
+    console.error("[TruckService] Failed to fetch single truck:", error);
+    return { garbage: null, recycling: null };
+  });
+
+  truckData = {
+    garbage: sanitizeLiveTruck(truckData.garbage),
+    recycling: sanitizeLiveTruck(truckData.recycling),
+  };
+
+  if (!truckData.garbage) {
+    truckData.garbage = await getRecentTruckFallback(routeId, "0");
+  }
+  if (!truckData.recycling) {
+    truckData.recycling = await getRecentTruckFallback(routeId, "1");
+  }
+
+  return truckData;
+}
+
+function candidateHasOfficialEta(candidate: NearbyPointCandidate): boolean {
   return (
-    nearbyPoints
-      .map((point) => buildPointCandidate(userLat, userLng, point))
-      .sort(comparePointCandidates)[0] ?? null
+    candidate.garbageEtaMinutes !== undefined ||
+    candidate.recyclingEtaMinutes !== undefined
   );
 }
 
@@ -432,7 +474,8 @@ export async function calculateEta(
   userLat: number,
   userLng: number
 ): Promise<EtaResult> {
-  const candidate = await selectNearbyCandidate(userLat, userLng);
+  const candidates = await selectNearbyCandidates(userLat, userLng);
+  let candidate = candidates[0];
 
   if (!candidate) {
     return {
@@ -440,6 +483,36 @@ export async function calculateEta(
       message:
         "⚠️ 找不到您附近的清運點，請確認 GPS 位置是否正確，或改在表定時間前後再查一次。",
     };
+  }
+
+  let truckData = await loadLiveTrucksForRoute(candidate.point.routeId);
+  let usedAlternateRoute = false;
+
+  const primaryHasSignal =
+    candidateHasOfficialEta(candidate) ||
+    Boolean(truckData.garbage || truckData.recycling);
+
+  // Alt-route fallback: if primary has no live signal, try other stops ≤100m away.
+  if (!primaryHasSignal) {
+    for (const alt of candidates.slice(1)) {
+      if (alt.distanceMeters > ALT_ROUTE_RADIUS_M) continue;
+      if (alt.point.routeId === candidate.point.routeId) continue;
+
+      const altTrucks = await loadLiveTrucksForRoute(alt.point.routeId);
+      if (
+        candidateHasOfficialEta(alt) ||
+        altTrucks.garbage ||
+        altTrucks.recycling
+      ) {
+        console.log(
+          `[TruckService] Switched to alt route ${alt.point.routeId} (${alt.distanceMeters.toFixed(0)}m)`
+        );
+        candidate = alt;
+        truckData = altTrucks;
+        usedAlternateRoute = true;
+        break;
+      }
+    }
   }
 
   const point = candidate.point;
@@ -455,40 +528,40 @@ export async function calculateEta(
       ? await getHistoricalAverage(routeId, targetSequence)
       : undefined;
   const historicalReference = historicalAvg ?? (point.historyTime || undefined);
-
-  let truckData = await syncSingleTruckFromHccg(routeId).catch((error) => {
-    console.error("[TruckService] Failed to fetch single truck:", error);
-    return { garbage: null, recycling: null };
-  });
-
-  // Official API keeps echoing dead GPS (often seq=-1) after runs end.
-  // Sanitize before any ETA math so we don't invent confident-but-wrong ETAs.
-  truckData = {
-    garbage: sanitizeLiveTruck(truckData.garbage),
-    recycling: sanitizeLiveTruck(truckData.recycling),
-  };
-
-  if (!truckData.garbage) {
-    truckData.garbage = await getRecentTruckFallback(routeId, "0");
-  }
-  if (!truckData.recycling) {
-    truckData.recycling = await getRecentTruckFallback(routeId, "1");
-  }
+  const etaBias =
+    targetSequence > 0
+      ? await getEtaErrorBiasMinutes(routeId, targetSequence)
+      : 0;
 
   const garbageTruck = truckData.garbage;
   const recyclingTruck = truckData.recycling;
 
-  const garbageEtaMinutes =
-    candidate.garbageEtaMinutes ??
-    (garbageTruck
-      ? estimateEtaFromTruck(garbageTruck, stopLat, stopLng, targetSequence)
-      : undefined);
+  let garbageEtaSource: EtaSource | undefined;
+  let recyclingEtaSource: EtaSource | undefined;
 
-  const recyclingEtaMinutes =
-    candidate.recyclingEtaMinutes ??
-    (recyclingTruck
-      ? estimateEtaFromTruck(recyclingTruck, stopLat, stopLng, targetSequence)
-      : undefined);
+  let garbageEtaMinutes: number | undefined;
+  if (candidate.garbageEtaMinutes !== undefined) {
+    garbageEtaMinutes = candidate.garbageEtaMinutes;
+    garbageEtaSource = "official";
+  } else if (garbageTruck) {
+    garbageEtaMinutes = applyEtaBias(
+      estimateEtaFromTruck(garbageTruck, stopLat, stopLng, targetSequence),
+      etaBias
+    );
+    garbageEtaSource = "estimated";
+  }
+
+  let recyclingEtaMinutes: number | undefined;
+  if (candidate.recyclingEtaMinutes !== undefined) {
+    recyclingEtaMinutes = candidate.recyclingEtaMinutes;
+    recyclingEtaSource = "official";
+  } else if (recyclingTruck) {
+    recyclingEtaMinutes = applyEtaBias(
+      estimateEtaFromTruck(recyclingTruck, stopLat, stopLng, targetSequence),
+      etaBias
+    );
+    recyclingEtaSource = "estimated";
+  }
 
   const liveTruckForStale = garbageTruck ?? recyclingTruck;
   const staleMinutes = liveTruckForStale
@@ -498,26 +571,26 @@ export async function calculateEta(
     ? getTruckAgeMs(liveTruckForStale) >= STALE_WARN_MS
     : false;
 
-  // Only mark "passed" with hard proof:
-  // 1) Live GPS sequence already past this stop, or
-  // 2) No live signal AND schedule is beyond the late-grace window (trucks are often 30–90 min late).
-  // Never treat "30 minutes past timetable" alone as passed — that was causing false
-  // 「今日無班次或已過站」 while the truck was still approaching.
   const isGarbagePassed =
     candidate.garbageEtaMinutes === undefined &&
     (garbageTruck
-      ? garbageTruck.heading_to_stop_sequence > targetSequence
-      : !candidate.hasTodayGarbage ||
-        (candidate.minutesUntilScheduled !== null &&
-          candidate.minutesUntilScheduled < -SCHEDULE_LATE_GRACE_MINUTES));
+      ? isSequencePastStop(garbageTruck.heading_to_stop_sequence, targetSequence)
+      : isSchedulePastGrace(
+          candidate.hasTodayGarbage,
+          candidate.minutesUntilScheduled
+        ));
 
   const isRecyclePassed =
     candidate.recyclingEtaMinutes === undefined &&
     (recyclingTruck
-      ? recyclingTruck.heading_to_stop_sequence > targetSequence
-      : !candidate.hasTodayRecycling ||
-        (candidate.minutesUntilScheduled !== null &&
-          candidate.minutesUntilScheduled < -SCHEDULE_LATE_GRACE_MINUTES));
+      ? isSequencePastStop(
+          recyclingTruck.heading_to_stop_sequence,
+          targetSequence
+        )
+      : isSchedulePastGrace(
+          candidate.hasTodayRecycling,
+          candidate.minutesUntilScheduled
+        ));
 
   const nextGarbageInfo = getNextScheduledArrival(
     point.trashDay,
@@ -566,6 +639,7 @@ export async function calculateEta(
       nextRecycleDate: nextRecycleInfo?.dateStr,
       isGarbagePassed,
       isRecyclePassed,
+      usedAlternateRoute,
       message:
         `📍 最近清運點：${stopName}\n` +
         `🕐 官方表定：${formattedTime}${historicalText}\n` +
@@ -624,19 +698,33 @@ export async function calculateEta(
       });
   }
 
+  const garbageSourceLabel =
+    garbageEtaSource === "official"
+      ? "官方即時"
+      : garbageEtaSource === "estimated"
+        ? "推估"
+        : null;
+  const recycleSourceLabel =
+    recyclingEtaSource === "official"
+      ? "官方即時"
+      : recyclingEtaSource === "estimated"
+        ? "推估"
+        : null;
+
   const messageLines = [
     `📍 最近清運點：${stopName}`,
+    usedAlternateRoute ? "🔄 已改追蹤附近有車的替代路線" : null,
     `🕐 官方表定：${formattedTime}`,
     historicalReference ? `📊 歷史平均：約 ${historicalReference}` : null,
     garbageEtaMinutes !== undefined
-      ? `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘`
+      ? `🚛 垃圾車：約 ${garbageEtaMinutes} 分鐘（${garbageSourceLabel}）`
       : nextGarbageInfo && !nextGarbageInfo.isToday
         ? `🚛 下次垃圾車：${nextGarbageInfo.dateStr}`
         : nextGarbageInfo?.isToday
           ? `🚛 垃圾車：今日表定 ${formattedTime}，目前尚無即時訊號（常會延誤，請稍後再查）`
           : "⚠️ 垃圾車目前沒有可用的即時 ETA",
     recyclingEtaMinutes !== undefined
-      ? `♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘`
+      ? `♻️ 回收車：約 ${recyclingEtaMinutes} 分鐘（${recycleSourceLabel}）`
       : nextRecycleInfo && !nextRecycleInfo.isToday
         ? `♻️ 下次回收車：${nextRecycleInfo.dateStr}`
         : nextRecycleInfo?.isToday
@@ -671,7 +759,60 @@ export async function calculateEta(
     message: messageLines.join("\n"),
     isStale,
     staleMinutes,
+    garbageEtaSource,
+    recyclingEtaSource,
+    usedAlternateRoute,
   };
+}
+
+async function getEtaErrorBiasMinutes(
+  routeId: string,
+  stopId: number
+): Promise<number> {
+  try {
+    const db = getSupabaseClient();
+    const thirtyDaysAgo = new Date(
+      Date.now() - 30 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const { data, error } = await db
+      .from("eta_logs")
+      .select("estimated_eta_minutes, predicted_arrival_time, actual_arrival_time")
+      .eq("route_id", routeId)
+      .eq("stop_id", stopId)
+      .not("actual_arrival_time", "is", null)
+      .not("estimated_eta_minutes", "is", null)
+      .gte("created_at", thirtyDaysAgo)
+      .limit(50);
+
+    if (error || !data || data.length === 0) return 0;
+
+    let totalBias = 0;
+    let count = 0;
+    for (const log of data) {
+      const estimated = Number(log.estimated_eta_minutes);
+      if (!Number.isFinite(estimated) || !log.predicted_arrival_time || !log.actual_arrival_time) {
+        continue;
+      }
+      const predicted = new Date(log.predicted_arrival_time).getTime();
+      const actual = new Date(log.actual_arrival_time).getTime();
+      if (Number.isNaN(predicted) || Number.isNaN(actual)) continue;
+
+      // Positive bias => we usually arrive later than predicted (over-optimistic ETA).
+      // Bias unit: estimated_minutes - actual_elapsed_minutes-from-query is hard without created_at;
+      // use predicted vs actual clock difference in minutes instead.
+      const bias = (predicted - actual) / 60_000;
+      if (!Number.isFinite(bias)) continue;
+      totalBias += bias;
+      count++;
+    }
+
+    if (count < 3) return 0;
+    return clampEtaBiasMinutes(totalBias / count);
+  } catch (error) {
+    console.error("[TruckService] Error calculating ETA bias:", error);
+    return 0;
+  }
 }
 
 async function getHistoricalAverage(routeId: string, stopId: number): Promise<string | undefined> {

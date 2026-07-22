@@ -94,7 +94,13 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
     params.append("stop", eta.nearestStopName || eta.nearestStopAddress || "");
   }
   if (eta.etaMinutes !== undefined) params.append("eta", eta.etaMinutes.toString());
-  
+  if (
+    eta.etaMinutes === undefined &&
+    !eta.nextGarbageDate &&
+    eta.scheduledTime
+  ) {
+    params.append("waiting", "1");
+  }
   const mapUrl = `${baseUrl}?${params.toString()}`;
 
   // Build Flex Message
@@ -130,8 +136,8 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                       ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)`
                       : (eta.scheduledTime ? `表定 ${eta.scheduledTime}（等待訊號）` : "未知"))),
                 weight: "bold",
-                size: eta.nextGarbageDate ? "sm" : "md",
-                color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : "#3b82f6"),
+                size: eta.nextGarbageDate ? "sm" : (eta.etaMinutes === undefined && eta.scheduledTime ? "sm" : "md"),
+                color: eta.nextGarbageDate ? "#9ca3af" : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 ? "#ef4444" : (eta.etaMinutes === undefined ? "#f59e0b" : "#3b82f6")),
                 margin: "md",
                 flex: 1,
                 wrap: true
@@ -174,6 +180,69 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   : `⚠️ GPS 已 ${eta.staleMinutes} 分鐘未更新，預估時間可能不準確。`,
                 color: (eta.staleMinutes ?? 0) > 120 ? "#92400e" : "#dc2626",
                 size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...(eta.etaMinutes === undefined && !eta.nextGarbageDate && eta.scheduledTime ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#fffbeb" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: "📡 今日仍可能來車，但目前沒有可用即時 GPS。建議稍後再查，或依表定時間提早等候。",
+                color: "#92400e" as const,
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...(eta.usedAlternateRoute ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#eff6ff" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: "🔄 原路線暫無訊號，已改追蹤附近 100 公尺內有車的替代路線。",
+                color: "#1d4ed8" as const,
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...(eta.garbageEtaSource || eta.recyclingEtaSource ? [{
+            type: "box" as const,
+            layout: "baseline" as const,
+            margin: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: "來源",
+                color: "#aaaaaa" as const,
+                size: "xs" as const,
+                flex: 1
+              },
+              {
+                type: "text" as const,
+                text: [
+                  eta.garbageEtaSource
+                    ? `🚛 ${eta.garbageEtaSource === "official" ? "官方即時" : "距離推估"}`
+                    : null,
+                  eta.recyclingEtaSource
+                    ? `♻️ ${eta.recyclingEtaSource === "official" ? "官方即時" : "距離推估"}`
+                    : null,
+                ].filter(Boolean).join("  "),
+                color: "#666666" as const,
+                size: "xs" as const,
+                flex: 4,
                 wrap: true
               }
             ]

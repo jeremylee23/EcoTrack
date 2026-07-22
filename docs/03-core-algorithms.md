@@ -10,13 +10,9 @@
 
 ### 解決方案
 在 `api/webhook.ts` 的 `handleLocationMessage` 中加入「切換偵測邏輯」：
-1. 收到新 GPS 時，計算出新的最近站點及其所屬路線 (`newStop.route_id`)。
+1. 收到新 GPS 時，用官方鄰近點 API 算出新路線 (`resolveNearestRoute`)。
 2. 從 Redis 讀出使用者上次追蹤的路線 (`prevRoute.routeId`)。
-3. 比對兩者。如果不一樣，就在回覆訊息中主動加上：
-   > 🔄 路線已切換
-   > 原路線：{舊路線}
-   > 新路線：{新路線}
-   > 現在將追蹤新地址最近的垃圾車 🚛
+3. 比對兩者。如果不一樣，就在回覆訊息中主動加上路線切換提示。
 4. 將新的路線寫回 Redis，更新快取。
 
 ---
@@ -36,37 +32,49 @@ HCCG API 回傳的車輛資料，如果該車輛今天沒有出勤（或是 GPS 
 2. `heading_to_stop_sequence >= 0`（拒絕官方常回的 `seq=-1` 收班殘留）
 3. `carStatus !== "1"`（已完成路線不計入即時 ETA）
 
-未通過者視為「目前沒有可用即時訊號」，改顯示官方表定／下次收運日，绝不拿死 GPS 硬算。
-
-#### B. 6 小時 Redis Fallback 門檻 (`STALE_THRESHOLD_MS`)
-在 `truck.service.ts` 的 `calculateEta` 中，當即時 API 抓不到該路線有發車時，我們會嘗試從 Redis 拿最近一次的紀錄，但仍走同一套 `sanitizeLiveTruck`。
-如果 Redis 裡的資料超過 6 小時（或 seq 無效），我們寧可當作「查無資料」，也不要拿舊資料誤導使用者。
+#### B. 6 小時 Redis Fallback 門檻
+Redis fallback 也走同一套 `sanitizeLiveTruck`。
 
 #### C. UI 提示文字分級
-在 `line.service.ts` 中，對於仍可用但偏舊的 GPS（超過 `STALE_WARN_MS` = 15 分鐘）給予警告：
-- **< 2 小時**：紅色背景，提示「⚠️ GPS 已 X 分鐘未更新，預估時間可能不準確。」（代表車子可能在跑，但進了隧道或訊號死角）
-- **> 2 小時**：黃色背景，提示「⚠️ GPS 訊號已超過 X 小時未更新（預估僅供參考） 💡 這不代表車輛閒置，昨日垃圾車仍可能正常出動，建議於表定時間前 30 分鐘再查。」（降低恐慌，並教育使用者政府 API 的特性）
+GPS 偏舊（>15 分鐘）時在 Flex 顯示警告。
 
 ---
 
 ## 3. 「已過站 / 今日無班次」誤判防護 (Late Grace)
 
-### 問題背景
-新竹垃圾車常比官方表定晚 **30–90 分鐘以上**。舊邏輯只要「現在 > 表定 + 30 分鐘」且當下抓不到 GPS，就判定 `isGarbagePassed`，接著回覆「今日無班次或已過站」。使用者實際聽到音樂、車快到了，查詢卻顯示已過站。
-
-### 解決方案
-1. **過站寬限** `SCHEDULE_LATE_GRACE_MINUTES = 120`：沒有即時 GPS 時，至少晚過表定 2 小時才用時間判定過站。
-2. **硬證據優先**：有即時 GPS 且 `seq > 目標站` 才算過站；有官方 `estimate >= 0` 時絕不判過站。
-3. **今日仍可能來車**：在寬限內且為收運日，改顯示「今日表定 + 等待即時訊號」，不要跳下次收運日。
-4. **空的 trashDay**：改用預設收運日 `[1,2,4,5,6]`，避免被誤判成今日無班。
+1. **過站寬限** `SCHEDULE_LATE_GRACE_MINUTES = 120`
+2. **硬證據優先**：有即時 GPS 且 `seq > 目標站` 才算過站；有官方 `estimate >= 0` 時絕不判過站
+3. **今日仍可能來車**：寬限內顯示「表定 + 等待訊號」
+4. **空的 trashDay**：預設 `[1,2,4,5,6]`
 
 ---
 
 ## 4. 鄰近替代路線搜尋 (Alternative Route Fallback)
 
-### 問題背景
-有些地點可能處於兩條路線的交界。原本的邏輯是「嚴格找距離最近的站點」，然後只去查該站點的專屬路線。
-如果該路線今天剛好沒車（或車子壞了沒開 GPS），系統就會直接回覆「找不到車」。但其實只要走幾步路，另一條路線的車可能正在附近收運。
+當主清運點所屬路線沒有官方即時 ETA、也沒有可用 GPS 時：
+1. 巡覽鄰近候選站點
+2. 條件：不同 `routeId`，距離使用者 ≤ **100m**
+3. 只要該路線有即時訊號，就自動切換追蹤並標記 `usedAlternateRoute`
 
-### 解決方案
-目前改以官方 `getPointData` 鄰近點 + 排序（有即時 ETA → 今日有班 → 表定接近度 → 距離）選最佳清運點。排序的時間罰則與 `SCHEDULE_LATE_GRACE_MINUTES` 對齊，避免「稍晚於表定」的住家站點被錯換到別條路線。
+---
+
+## 5. ETA 來源與歷史校正
+
+- **官方即時**：`getPointData.estimate >= 0` 且 `status=1`
+- **距離推估**：由車輛 GPS + 均速推算，並用 `eta_logs` 的預測/實際誤差做小幅 bias 校正（±15 分鐘內）
+- UI 會標示來源（官方即時 / 距離推估）
+
+---
+
+## 6. Webhook 錯誤回覆
+
+任何 handler 例外都應盡力用 `replyToken` 回覆「系統暫時無法完成查詢」，避免 LINE 端看起來完全無反應。
+
+---
+
+## 7. 靠近提醒（Approaching Notify）
+
+`/api/cron/notify-approaching`（GitHub Actions 每 10 分鐘）：
+- 找出 `notify_enabled=true` 且有住家座標的使用者
+- `calculateEta` 若垃圾車 ETA ≤ 5 分鐘 → LINE Push
+- Redis key `notify_sent:{userId}:{routeId}:{YYYY-MM-DD}` 去重

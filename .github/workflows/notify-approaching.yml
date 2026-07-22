@@ -1,0 +1,25 @@
+name: Notify Approaching Trucks
+
+# Poll every 10 minutes and ask the API to push LINE reminders when ETA ≤ 5 min.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call notify-approaching cron
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "CRON_SECRET secret not set — skip notify cron"
+            exit 0
+          fi
+          curl -sS -f --max-time 60 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://ecotrack-hsinchu.vercel.app/api/cron/notify-approaching"
+          echo

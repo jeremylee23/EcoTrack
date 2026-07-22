@@ -69,9 +69,10 @@ vercel --prod
 ```
 
 ## 🤝 貢獻與未來展望
-目前我們已成功涵蓋新竹市「東區、北區、香山區」全區資料。下一步我們將：
-1.  **導入 LINE Notify**：解決 Messaging API 的推播則數限制，實現「垃圾車靠近前 5 分鐘自動推播」的零成本架構。
-2.  **ETA 模型訓練**：利用 `eta_logs` 累積的數據，改善目前單純依靠均速計算的 ETA 演算法。
+目前我們已成功涵蓋新竹市「東區、北區、香山區」全區資料。營運建議：
+1. **Supabase Pro**：Free 方案約 7 天低活動會自動暫停；keep-alive 只能降風險，正式服務建議升級。
+2. **靠近提醒**：已由 GitHub Actions 每 10 分鐘呼叫 `/api/cron/notify-approaching`（需設定 `CRON_SECRET` secret）。
+3. **ETA 校正**：持續累積 `eta_logs`，系統會用歷史誤差微調推估 ETA。
 
 ---
 *Developed by Jeremy Lee / 2026*

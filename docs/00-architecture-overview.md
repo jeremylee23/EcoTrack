@@ -24,11 +24,12 @@ Vercel Serverless Function
                           ├── syncSingleTruck() → HCCG API (7966.hccg.gov.tw)
                           └── getTruckLiveData() → Upstash Redis (fallback)
 
-Vercel Cron Job (每 5 分鐘)
-  /api/cron/sync-trucks.ts
-      │ 全區掃描
-      ▼
-  HCCG API → Upstash Redis (批次更新所有路線)
+Vercel Cron Job
+  /api/cron/sync-trucks.ts     (每日 00:00 UTC)
+  /api/health                  (每 6 小時，Supabase keep-alive)
+GitHub Actions
+  Keep Supabase Alive          (每 6 小時)
+  Notify Approaching Trucks    (每 10 分鐘 → /api/cron/notify-approaching)
 ```
 
 ## 雲端服務清單
@@ -69,15 +70,16 @@ Vercel Cron Job (每 5 分鐘)
   → buildEtaMessages() [Flex Message 卡片]
 ```
 
-### 3. 背景同步（Cron）
+### 3. 背景同步與提醒
 
 ```
-Vercel Cron 每 5 分鐘
-  → /api/cron/sync-trucks
-  → syncTrucksFromHccg() [全區 130+ 台車]
-  → 驗證座標（台灣邊界 + 0,0 過濾）
-  → 瞬移偵測（Teleport Detection）
-  → setTruckLiveData(routeId, liveData) [Redis TTL 300s]
+Vercel Cron
+  每日 00:00 UTC → /api/cron/sync-trucks（全區 GPS → Redis）
+  每 6 小時     → /api/health（查 users，維持 Supabase 活動）
+
+GitHub Actions
+  每 6 小時  → Keep Supabase Alive（檢查 database=connected）
+  每 10 分鐘 → Notify Approaching（ETA≤5 分鐘 LINE Push）
 ```
 
 ## 目錄結構
@@ -87,7 +89,8 @@ EcoTrack/
 ├── api/
 │   ├── webhook.ts          # LINE Webhook 主入口
 │   └── cron/
-│       └── sync-trucks.ts  # 每 5 分鐘 GPS 同步
+│       ├── sync-trucks.ts         # 每日 GPS 同步
+│       └── notify-approaching.ts  # 靠近 5 分鐘推播
 ├── src/
 │   ├── config/index.ts     # 環境變數集中管理
 │   ├── services/

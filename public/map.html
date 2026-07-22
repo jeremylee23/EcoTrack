@@ -151,7 +151,10 @@
     const carNo = params.get('car') || '未知車牌';
     const rCarNo = params.get('rCar') || '';
     const stopName = params.get('stop') || '清運點';
-    const eta = parseInt(params.get('eta')) || 0;
+    const etaParam = params.get('eta');
+    const eta = etaParam !== null && etaParam !== '' ? parseInt(etaParam, 10) : NaN;
+    const waitingSignal = params.get('waiting') === '1' || (Number.isNaN(eta) && (isNaN(tLat) || isNaN(tLng)));
+
 
     // 2. Setup map
     const map = L.map('map', {
@@ -252,11 +255,16 @@
     document.getElementById('stopName').textContent = decodeURIComponent(stopName);
     
     const badge = document.getElementById('etaBadge');
-    if (eta <= 1) {
+    if (waitingSignal) {
+      badge.textContent = '等待即時訊號';
+      badge.style.background = '#f59e0b';
+    } else if (!Number.isNaN(eta) && eta <= 1) {
       badge.textContent = '即將抵達';
       badge.classList.add('urgent');
-    } else {
+    } else if (!Number.isNaN(eta)) {
       badge.textContent = `約 ${eta} 分鐘`;
+    } else {
+      badge.textContent = '暫無 ETA';
     }
   </script>
 </body>

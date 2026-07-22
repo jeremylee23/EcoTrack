@@ -20,6 +20,7 @@
 | `home_lng` | float8 | 經度（反正規化）|
 | `created_at` | timestamptz | 建立時間 |
 | `updated_at` | timestamptz | 最後更新 |
+| `notify_enabled` | boolean | 靠近提醒開關（預設 `true`）|
 
 ---
 

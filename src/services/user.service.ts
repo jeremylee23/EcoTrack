@@ -116,3 +116,64 @@ export async function getNearestStop(
 
   return stops;
 }
+
+/**
+ * Users eligible for approaching-truck push reminders.
+ */
+export async function listUsersForNotify(limit = 80): Promise<
+  Array<{ line_user_id: string; home_lat: number; home_lng: number }>
+> {
+  const db = getSupabaseClient();
+
+  const mapRows = (
+    data: Array<{
+      line_user_id: string;
+      home_lat: number | null;
+      home_lng: number | null;
+    }> | null
+  ) =>
+    (data ?? [])
+      .filter(
+        (row): row is { line_user_id: string; home_lat: number; home_lng: number } =>
+          typeof row.line_user_id === "string" &&
+          typeof row.home_lat === "number" &&
+          typeof row.home_lng === "number"
+      )
+      .map(({ line_user_id, home_lat, home_lng }) => ({
+        line_user_id,
+        home_lat,
+        home_lng,
+      }));
+
+  const primary = await db
+    .from("users")
+    .select("line_user_id, home_lat, home_lng, notify_enabled")
+    .eq("notify_enabled", true)
+    .not("home_lat", "is", null)
+    .not("home_lng", "is", null)
+    .limit(limit);
+
+  if (!primary.error) {
+    return mapRows(primary.data);
+  }
+
+  // Migration 004 may not be applied yet — fall back without the column filter.
+  console.warn(
+    "[UserService] notify_enabled unavailable, falling back:",
+    primary.error.message
+  );
+  const fallback = await db
+    .from("users")
+    .select("line_user_id, home_lat, home_lng")
+    .not("home_lat", "is", null)
+    .not("home_lng", "is", null)
+    .limit(limit);
+
+  if (fallback.error) {
+    throw new Error(
+      `[UserService] listUsersForNotify failed: ${fallback.error.message}`
+    );
+  }
+
+  return mapRows(fallback.data);
+}
