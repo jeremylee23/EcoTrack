@@ -29,6 +29,7 @@ const W = 2500;
 const H = 843;
 const COL_W = [833, 834, 833] as const;
 const ROW_H = [421, 422] as const;
+type MenuIcon = "location" | "truck" | "calendar" | "star" | "map" | "book";
 
 function cellX(col: number): number {
   return COL_W.slice(0, col).reduce((a, b) => a + b, 0);
@@ -38,66 +39,138 @@ function cellY(row: number): number {
   return ROW_H.slice(0, row).reduce((a, b) => a + b, 0);
 }
 
+function renderIcon(icon: MenuIcon, cx: number, cy: number, color: string): string {
+  switch (icon) {
+    case "location":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M0 -42 C-24 -42 -42 -24 -42 0 C-42 30 0 68 0 68 C0 68 42 30 42 0 C42 -24 24 -42 0 -42 Z"/>
+          <circle cx="0" cy="0" r="14" fill="${color}" stroke="none"/>
+        </g>
+      `;
+    case "truck":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="-48" y="-22" width="58" height="36" rx="6"/>
+          <path d="M10 -10 H34 L48 6 V14 H10 Z"/>
+          <line x1="34" y1="-10" x2="34" y2="6"/>
+          <circle cx="-24" cy="24" r="8" fill="${color}" stroke="none"/>
+          <circle cx="24" cy="24" r="8" fill="${color}" stroke="none"/>
+          <line x1="-8" y1="24" x2="8" y2="24"/>
+        </g>
+      `;
+    case "calendar":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="-42" y="-34" width="84" height="72" rx="12"/>
+          <line x1="-42" y1="-8" x2="42" y2="-8"/>
+          <line x1="-18" y1="-46" x2="-18" y2="-20"/>
+          <line x1="18" y1="-46" x2="18" y2="-20"/>
+          <circle cx="-16" cy="14" r="5" fill="${color}" stroke="none"/>
+          <circle cx="0" cy="14" r="5" fill="${color}" stroke="none"/>
+          <circle cx="16" cy="14" r="5" fill="${color}" stroke="none"/>
+        </g>
+      `;
+    case "star":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="${color}">
+          <path d="M0 -48 L13 -14 L50 -14 L20 8 L31 44 L0 23 L-31 44 L-20 8 L-50 -14 L-13 -14 Z"/>
+        </g>
+      `;
+    case "map":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M-44 -30 L-14 -40 L14 -20 L44 -30 V30 L14 40 L-14 20 L-44 30 Z"/>
+          <line x1="-14" y1="-40" x2="-14" y2="20"/>
+          <line x1="14" y1="-20" x2="14" y2="40"/>
+          <circle cx="0" cy="4" r="8" fill="${color}" stroke="none"/>
+        </g>
+      `;
+    case "book":
+      return `
+        <g transform="translate(${cx} ${cy})" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M-38 -30 H-4 C10 -30 20 -20 20 -6 V38 C10 30 2 26 -10 26 H-38 Z"/>
+          <path d="M38 -30 H4 C-10 -30 -20 -20 -20 -6 V38 C-10 30 -2 26 10 26 H38 Z"/>
+          <line x1="0" y1="-26" x2="0" y2="38"/>
+        </g>
+      `;
+  }
+}
+
 async function createRichMenuImage(): Promise<string> {
   console.log("🎨 Generating 6-cell Rich Menu image...");
 
   // No emoji in SVG text — Pango on macOS crashes on color emoji fonts.
-  // Keep only one large label per cell so seniors read the same words everywhere.
+  // Use vector icons plus oversized labels so seniors can scan the menu quickly.
   const cells: Array<{
     col: number;
     row: number;
     title: string;
-    badge: string;
+    icon: MenuIcon;
     bg: string;
     fg: string;
+    iconBg: string;
+    iconFg: string;
   }> = [
     {
       col: 0,
       row: 0,
       title: "定位",
-      badge: "#2563eb",
+      icon: "location",
       bg: "#ffffff",
       fg: "#111827",
+      iconBg: "#2563eb",
+      iconFg: "#ffffff",
     },
     {
       col: 1,
       row: 0,
       title: "垃圾車",
-      badge: "#ffffff",
+      icon: "truck",
       bg: "#059669",
       fg: "#ffffff",
+      iconBg: "#ffffff",
+      iconFg: "#059669",
     },
     {
       col: 2,
       row: 0,
       title: "班表",
-      badge: "#ffffff",
+      icon: "calendar",
       bg: "#0f766e",
       fg: "#ffffff",
+      iconBg: "#ffffff",
+      iconFg: "#0f766e",
     },
     {
       col: 0,
       row: 1,
       title: "最愛",
-      badge: "#ea580c",
+      icon: "star",
       bg: "#fff7ed",
       fg: "#9a3412",
+      iconBg: "#ea580c",
+      iconFg: "#ffffff",
     },
     {
       col: 1,
       row: 1,
       title: "附近",
-      badge: "#2563eb",
+      icon: "map",
       bg: "#eff6ff",
       fg: "#1e40af",
+      iconBg: "#2563eb",
+      iconFg: "#ffffff",
     },
     {
       col: 2,
       row: 1,
       title: "說明",
-      badge: "#6b7280",
+      icon: "book",
       bg: "#f3f4f6",
       fg: "#374151",
+      iconBg: "#4b5563",
+      iconFg: "#ffffff",
     },
   ];
 
@@ -110,12 +183,15 @@ async function createRichMenuImage(): Promise<string> {
       const pad = 14;
       const cx = x + w / 2;
       const cy = y + h / 2;
+      const iconY = cy - 88;
+      const textY = cy + 108;
       return `
         <rect x="${x + pad}" y="${y + pad}" width="${w - pad * 2}" height="${h - pad * 2}"
               rx="28" fill="${c.bg}" />
-        <circle cx="${cx}" cy="${cy - 90}" r="24" fill="${c.badge}" />
-        <text x="${cx}" y="${cy + 36}" font-family="PingFang TC, Heiti TC, sans-serif"
-          font-size="118" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
+        <circle cx="${cx}" cy="${iconY}" r="86" fill="${c.iconBg}" />
+        ${renderIcon(c.icon, cx, iconY, c.iconFg)}
+        <text x="${cx}" y="${textY}" font-family="PingFang TC, Heiti TC, sans-serif"
+          font-size="146" font-weight="800" fill="${c.fg}" text-anchor="middle" dominant-baseline="middle">${c.title}</text>
       `;
     })
     .join("\n");

@@ -34,7 +34,10 @@ export async function replyMessage(
   messages: Message[]
 ): Promise<void> {
   const client = getLineClient();
-  await client.replyMessage({ replyToken, messages });
+  await client.replyMessage({
+    replyToken,
+    messages: messages.map(stripQuickReply),
+  });
 }
 
 export async function pushMessage(
@@ -42,7 +45,17 @@ export async function pushMessage(
   messages: Message[]
 ): Promise<void> {
   const client = getLineClient();
-  await client.pushMessage({ to: userId, messages });
+  await client.pushMessage({
+    to: userId,
+    messages: messages.map(stripQuickReply),
+  });
+}
+
+function stripQuickReply(message: Message): Message {
+  const { quickReply: _quickReply, ...rest } = message as Message & {
+    quickReply?: messagingApi.TextMessage["quickReply"];
+  };
+  return rest as Message;
 }
 
 // ── Message builders ─────────────────────────────────────────
