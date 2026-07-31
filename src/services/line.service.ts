@@ -14,6 +14,8 @@ export type LocationMessage = messagingApi.LocationMessage;
 export type FlexMessage = messagingApi.FlexMessage;
 export type Message = messagingApi.Message;
 
+const MAP_PAGE_VERSION = "20260731-viewport-lock";
+
 // ── Singleton LINE MessagingApiClient ────────────────────────
 
 let _client: messagingApi.MessagingApiClient | null = null;
@@ -128,6 +130,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
   // Construct Map URL
   const baseUrl = "https://ecotrack-hsinchu.vercel.app/map";
   const params = new URLSearchParams();
+  params.append("v", MAP_PAGE_VERSION);
   if (eta.userLat) params.append("uLat", eta.userLat.toString());
   if (eta.userLng) params.append("uLng", eta.userLng.toString());
   if (eta.stopLat) params.append("sLat", eta.stopLat.toString());
@@ -1064,6 +1067,7 @@ export function buildNearbyStopsFlex(guide: {
     focus?: { lat: number; lng: number; name: string; routeId?: string; routeName?: string }
   ): string => {
     const params = new URLSearchParams();
+    params.set("v", MAP_PAGE_VERSION);
     params.set("uLat", String(guide.userLat));
     params.set("uLng", String(guide.userLng));
     params.set("radius", String(guide.radiusMeters));
