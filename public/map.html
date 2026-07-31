@@ -349,8 +349,6 @@
           (data.routeName || routeName || '清運路線') + '（完整路線）'
         );
 
-        pts.forEach(function (p) { bounds.extend(p); });
-
         var closest = data.closest;
         // If Flex/ETA already chose a recommend pin (sLat/sLng), KEEP IT.
         // Do not let route-path "nearest on polyline" override into an alley.
@@ -361,9 +359,6 @@
             tipRowLocked.style.display = 'flex';
             tipElLocked.textContent =
               '藍線＝完整路線；紅旗＝訊息建議等候處（與卡片同步，不會改推巷弄）';
-          }
-          if (bounds.isValid()) {
-            map.fitBounds(bounds, { padding: [48, 48], maxZoom: 17 });
           }
           return;
         }
@@ -386,18 +381,6 @@
               '距離約 ' + closest.distanceMeters + ' 公尺<br/>' +
               (closest.statusLabel || '')
             );
-          bounds.extend([closest.lat, closest.lng]);
-
-          // Focus near home + wait point + truck (full line still drawn)
-          var focus = L.latLngBounds();
-          if (!isNaN(uLat) && !isNaN(uLng)) focus.extend([uLat, uLng]);
-          focus.extend([closest.lat, closest.lng]);
-          if (!isNaN(tLat) && !isNaN(tLng)) focus.extend([tLat, tLng]);
-          if (focus.isValid()) {
-            map.fitBounds(focus, { padding: [60, 60], maxZoom: 16 });
-          } else if (bounds.isValid()) {
-            map.fitBounds(bounds, { padding: [40, 40] });
-          }
 
           document.getElementById('stopName').textContent =
             '建議等：' + (closest.name || '路線最近點') +
@@ -411,8 +394,6 @@
               ? ('表定 ' + closest.scheduledTime)
               : '沿線等候';
           }
-        } else if (bounds.isValid()) {
-          map.fitBounds(bounds, { padding: [48, 48] });
         }
 
         var tipRow = document.getElementById('routeTipRow');
