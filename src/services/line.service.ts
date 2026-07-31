@@ -47,7 +47,7 @@ export async function pushMessage(
 
 // ── Message builders ─────────────────────────────────────────
 
-/** Compact quick replies under the last bubble (complements the 6-cell Rich Menu). */
+/** Keep export shape stable; primary navigation now relies on the Rich Menu only. */
 export const MAIN_QUICK_REPLIES: messagingApi.QuickReplyItem[] = [
   {
     type: "action",
@@ -73,22 +73,16 @@ export const MAIN_QUICK_REPLIES: messagingApi.QuickReplyItem[] = [
 
 export function withQuickReply(
   message: Message,
-  items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
+  _items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
 ): Message {
-  return {
-    ...message,
-    quickReply: { items },
-  };
+  return message;
 }
 
 export function attachQuickReplyToLast(
   messages: Message[],
-  items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
+  _items: messagingApi.QuickReplyItem[] = MAIN_QUICK_REPLIES
 ): Message[] {
-  if (messages.length === 0) return messages;
-  const next = [...messages];
-  next[next.length - 1] = withQuickReply(next[next.length - 1], items);
-  return next;
+  return messages;
 }
 
 export function buildTextMessage(text: string): TextMessage {
@@ -341,7 +335,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
             contents: [
               {
                 type: "text" as const,
-                text: `🚩 附近待清運點 ${eta.nearbyUncleared!.length} 處（地圖可一次看完，優於官方逐點點選）`,
+                text: `🚩 附近待清運點 ${eta.nearbyUncleared!.length} 處（地圖可一次看完，不用一個一個找）`,
                 color: "#9a3412" as const,
                 size: "xs" as const,
                 wrap: true
@@ -538,8 +532,8 @@ export function buildLocationConfirmMessage(
       `📍 已記住「定位存的地方」\n` +
         `📌 ${address}` +
         (extraNotice ? `\n${extraNotice}` : "") +
-        `\n\n👉 接下來請點下面「🚛 垃圾車」\n` +
-        `若還要存兒子家、公司：點選單「⭐ 最愛」→「新增地方」`
+        `\n\n接下來請點選單「垃圾車」\n` +
+        `若還要存兒子家、公司：點選單「最愛」→「新增地方」`
     )
   ) as TextMessage;
 }
@@ -548,16 +542,15 @@ export function buildWelcomeMessage(): TextMessage {
   return withQuickReply(
     buildTextMessage(
       `👋 歡迎使用新竹垃圾車提醒\n\n` +
-        `長輩只要點大按鈕：\n` +
-        `1️⃣ 定位 → 傳你平常倒垃圾的位置（會記住門牌）\n` +
-        `2️⃣ 垃圾車 → 看何時到\n` +
-        `3️⃣ 班表 → 哪幾天有收\n` +
-        `4️⃣ 最愛 → 換地方查（每個地方都寫門牌）\n` +
-        `5️⃣ 附近 → 看哪裡可倒（有圖有地圖）\n` +
-        `6️⃣ 說明\n\n` +
-        `「定位存的地方」＝你用「定位」傳過的那一點；\n` +
-        `「最愛」＝另外加的地方（兒子家、公司等）。\n` +
-        `家人可幫最愛加暱稱，地址仍會顯示。`
+        `請看選單這 6 個：\n` +
+        `1️⃣ 定位：記住倒垃圾的地方\n` +
+        `2️⃣ 垃圾車：看車多久到\n` +
+        `3️⃣ 班表：看這週哪天有收\n` +
+        `4️⃣ 最愛：換別的地方查\n` +
+        `5️⃣ 附近：看附近清運點\n` +
+        `6️⃣ 說明：看怎麼用\n\n` +
+        `「定位存的地方」就是你按「定位」記住的地方；\n` +
+        `「最愛」是另外存的地方，例如兒子家、公司。`
     )
   ) as TextMessage;
 }
@@ -581,7 +574,7 @@ export function buildFavoritesMenuFlex(options: {
   const isHome = !activeId;
   const homeAddr =
     homeAddress?.trim() ||
-    "（還沒有門牌：請再點一次底部「定位」傳位置）";
+    "（還沒記住這裡：請點選單「定位」）";
 
   const homeBlock = {
     type: "box" as const,
@@ -609,7 +602,7 @@ export function buildFavoritesMenuFlex(options: {
       },
       {
         type: "text" as const,
-        text: "＝ 你用底部「定位」傳過的位置（不是最愛裡的其他地方）",
+        text: "＝ 你按「定位」記住的地方",
         size: "xs" as const,
         color: "#6b7280",
         wrap: true,
@@ -685,7 +678,7 @@ export function buildFavoritesMenuFlex(options: {
     favorites.length > 0
       ? {
           type: "text" as const,
-          text: "上面第一個＝定位存的；下面＝最愛裡加過的其他地方。",
+          text: "第一個是「定位存的地方」；下面是「最愛」裡其他地方。",
           size: "sm" as const,
           color: "#6b7280",
           wrap: true,
@@ -693,7 +686,7 @@ export function buildFavoritesMenuFlex(options: {
         }
       : {
           type: "text" as const,
-          text: "若還要查兒子家、公司等，點下面「新增地方」。",
+          text: "若還要查兒子家、公司等，請點「新增地方」。",
           size: "sm" as const,
           color: "#6b7280",
           wrap: true,
@@ -721,7 +714,7 @@ export function buildFavoritesMenuFlex(options: {
           },
           {
             type: "text",
-            text: "每個地方都會寫出門牌，點「選這個查車」即可。",
+            text: "每個地方都會寫門牌，選一個就能查垃圾車。",
             size: "md",
             color: "#4b5563",
             wrap: true,
@@ -782,12 +775,11 @@ export function buildFavoritesMenuFlex(options: {
 export function buildAskSendLocationFlex(
   purpose: "add" | "home" = "add"
 ): FlexMessage {
-  const title =
-    purpose === "add" ? "新增一個地方" : "用定位記住你的位置";
+  const title = purpose === "add" ? "新增地方" : "請按「定位」";
   const body =
     purpose === "add"
-      ? "請按下面綠色按鈕傳位置。\n系統會自動用地址記住，不用取名。"
-      : "請按下面綠色按鈕傳位置。\n之後選單會顯示「定位存的地方」＋門牌。";
+      ? "請點選單「定位」。\n系統會把這裡加到「最愛」，不用自己打地址。"
+      : "請點選單「定位」。\n系統會記住這裡，之後可直接查垃圾車。";
 
   return {
     type: "flex",
@@ -814,23 +806,6 @@ export function buildAskSendLocationFlex(
             size: "md",
             color: "#4b5563",
             wrap: true,
-          },
-        ],
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "button",
-            style: "primary",
-            color: "#059669",
-            height: "md",
-            action: {
-              type: "uri",
-              label: "📍 按這裡傳送位置",
-              uri: "https://line.me/R/nv/location/",
-            },
           },
         ],
       },
@@ -884,7 +859,7 @@ export function buildSavedPlaceFlex(options: {
             : []),
           {
             type: "text",
-            text: "長輩之後只要點「最愛」再點這裡即可。\n家人若要好記，可加暱稱（地址仍保留）。",
+            text: "之後點「最愛」就能查這裡。\n若要更好認，可再加暱稱。",
             size: "sm",
             color: "#4b5563",
             wrap: true,
@@ -942,7 +917,7 @@ export function buildPickNicknameTargetFlex(
           },
           {
             type: "text",
-            text: "暱稱是備註；地址會一直顯示在下面。",
+            text: "暱稱只是備註；地址會一起顯示。",
             size: "md",
             color: "#4b5563",
             wrap: true,

@@ -151,7 +151,7 @@ async function replyEtaNow(
     await replyMessage(replyToken, [
       withQuickReply(
         buildTextMessage(
-          "還沒設定位置。\n請先點底部選單「📍 定位」，傳一次你的位置。"
+          "還沒設定地方。\n請先點選單「定位」。"
         )
       ),
     ]);
@@ -528,7 +528,7 @@ async function handleTextMessage(
       userId,
       replyToken,
       withQuickReply(
-        buildTextMessage("不用這樣打字。請用下面大按鈕操作即可。")
+        buildTextMessage("不用這樣打字。請直接點選單就好。")
       )
     );
     return;
@@ -550,7 +550,7 @@ async function handleTextMessage(
     const prefs = await getUserPrefs(userId);
     if (prefs.favorites.length === 0) {
       await replyMessage(replyToken, [
-        withQuickReply(buildTextMessage("還沒有其他地方。請先「新增地方」。")),
+        withQuickReply(buildTextMessage("還沒有其他地方。請先點「新增地方」。")),
       ]);
       return;
     }
@@ -679,7 +679,7 @@ async function handleTextMessage(
         userId,
         replyToken,
         withQuickReply(
-          buildTextMessage(`還沒有「${label}」。請先「新增地方」傳位置。`)
+          buildTextMessage(`還沒有「${label}」。請先點「最愛」→「新增地方」，再按「定位」。`)
         )
       );
       return;
@@ -741,7 +741,7 @@ async function handleTextMessage(
     if (!coords) {
       await replyMessage(replyToken, [
         withQuickReply(
-          buildTextMessage("請先點選單「定位」設位置，再查附近清運點。")
+          buildTextMessage("請先點選單「定位」，再查「附近」。")
         ),
       ]);
       return;
@@ -765,7 +765,7 @@ async function handleTextMessage(
     const coords = await getActiveCoords(userId);
     if (!coords) {
       await replyMessage(replyToken, [
-        withQuickReply(buildTextMessage("請先點選單「定位」傳你的位置。")),
+        withQuickReply(buildTextMessage("請先點選單「定位」。")),
       ]);
       return;
     }

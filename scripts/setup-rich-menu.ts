@@ -1,6 +1,6 @@
 /**
  * scripts/setup-rich-menu.ts
- * Rebuilds the default LINE Rich Menu as a 6-cell UX grid.
+ * Rebuilds the default LINE Rich Menu as a 6-cell senior-friendly grid.
  *
  * Layout (2500×843):
  *  [ 📍定位 ] [ 🚛垃圾車 ] [ 📅班表 ]
@@ -42,76 +42,62 @@ async function createRichMenuImage(): Promise<string> {
   console.log("🎨 Generating 6-cell Rich Menu image...");
 
   // No emoji in SVG text — Pango on macOS crashes on color emoji fonts.
-  // Use a colored badge + Chinese labels so seniors can still scan by color.
+  // Keep only one large label per cell so seniors read the same words everywhere.
   const cells: Array<{
     col: number;
     row: number;
     title: string;
-    subtitle: string;
     badge: string;
     bg: string;
     fg: string;
-    subFg: string;
   }> = [
     {
       col: 0,
       row: 0,
       title: "定位",
-      subtitle: "傳你的位置",
       badge: "#2563eb",
       bg: "#ffffff",
       fg: "#111827",
-      subFg: "#6b7280",
     },
     {
       col: 1,
       row: 0,
       title: "垃圾車",
-      subtitle: "即時到達",
       badge: "#ffffff",
       bg: "#059669",
       fg: "#ffffff",
-      subFg: "#d1fae5",
     },
     {
       col: 2,
       row: 0,
       title: "班表",
-      subtitle: "本週清運",
       badge: "#ffffff",
       bg: "#0f766e",
       fg: "#ffffff",
-      subFg: "#ccfbf1",
     },
     {
       col: 0,
       row: 1,
       title: "最愛",
-      subtitle: "一鍵換地方",
       badge: "#ea580c",
       bg: "#fff7ed",
       fg: "#9a3412",
-      subFg: "#c2410c",
     },
     {
       col: 1,
       row: 1,
       title: "附近",
-      subtitle: "清運點地圖",
       badge: "#2563eb",
       bg: "#eff6ff",
       fg: "#1e40af",
-      subFg: "#3b82f6",
     },
     {
       col: 2,
       row: 1,
       title: "說明",
-      subtitle: "怎麼用",
       badge: "#6b7280",
       bg: "#f3f4f6",
       fg: "#374151",
-      subFg: "#6b7280",
     },
   ];
 
@@ -127,11 +113,9 @@ async function createRichMenuImage(): Promise<string> {
       return `
         <rect x="${x + pad}" y="${y + pad}" width="${w - pad * 2}" height="${h - pad * 2}"
               rx="28" fill="${c.bg}" />
-        <circle cx="${cx}" cy="${cy - 78}" r="22" fill="${c.badge}" />
-        <text x="${cx}" y="${cy + 18}" font-family="PingFang TC, Heiti TC, sans-serif"
-              font-size="88" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
-        <text x="${cx}" y="${cy + 88}" font-family="PingFang TC, Heiti TC, sans-serif"
-              font-size="44" font-weight="600" fill="${c.subFg}" text-anchor="middle">${c.subtitle}</text>
+        <circle cx="${cx}" cy="${cy - 90}" r="24" fill="${c.badge}" />
+        <text x="${cx}" y="${cy + 36}" font-family="PingFang TC, Heiti TC, sans-serif"
+          font-size="118" font-weight="700" fill="${c.fg}" text-anchor="middle">${c.title}</text>
       `;
     })
     .join("\n");
@@ -192,7 +176,7 @@ async function setupRichMenu(): Promise<void> {
         },
         {
           bounds: { x: cellX(1), y: cellY(1), width: COL_W[1], height: ROW_H[1] },
-          action: { type: "message", text: "附近清運點" },
+          action: { type: "message", text: "附近" },
         },
         {
           bounds: { x: cellX(2), y: cellY(1), width: COL_W[2], height: ROW_H[1] },
