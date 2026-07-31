@@ -1,13 +1,22 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { createClient } from "@supabase/supabase-js";
-import { config } from "../config/index.js";
-
-const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
-const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
-  auth: { persistSession: false },
-});
+import {
+  getGeminiClient,
+  getSupabaseClient,
+  isGeminiConfigured,
+} from "./clients.js";
 
 export type Intent = "eta" | "rag" | "help" | "unknown";
+
+function classifyIntentWithoutGemini(text: string): Intent {
+  if (/你好|說明|幫助|help|如何/.test(text)) return "help";
+  if (/為什麼|怎麼|可以|是否|什麼|哪種|規定|垃圾|回收|廚餘/.test(text)) {
+    return "rag";
+  }
+  if (/^垃圾車$|在哪|幾點|到了|附近|班表|清運點|查車/.test(text)) {
+    return "eta";
+  }
+  if (text.trim().length >= 8) return "rag";
+  return "unknown";
+}
 
 /**
  * 透過 Gemini 判斷使用者的意圖。
@@ -19,8 +28,14 @@ export async function classifyIntent(text: string): Promise<Intent> {
     return "eta";
   }
 
+  if (!isGeminiConfigured()) {
+    return classifyIntentWithoutGemini(text);
+  }
+
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+    const model = getGeminiClient().getGenerativeModel({
+      model: "gemini-flash-latest",
+    });
     const prompt = `
 你是一個新竹市垃圾車客服系統的意圖分類器。
 使用者會傳送一句話，請你判斷這句話的意圖，只能回傳以下其中一個單字：
@@ -50,7 +65,9 @@ export async function classifyIntent(text: string): Promise<Intent> {
  * 將文字轉成向量
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
+  const model = getGeminiClient().getGenerativeModel({
+    model: "gemini-embedding-2",
+  });
   const result = await model.embedContent(text);
   const embedding = result.embedding;
   if (!embedding || !embedding.values) {
@@ -63,12 +80,16 @@ export async function generateEmbedding(text: string): Promise<number[]> {
  * RAG 核心：檢索知識庫並生成回覆
  */
 export async function generateRagResponse(query: string): Promise<string> {
+  if (!isGeminiConfigured()) {
+    return "抱歉，目前知識問答功能暫時未啟用；您仍可直接查垃圾車、附近清運點或班表。";
+  }
+
   try {
     // 1. 將問題轉為向量
     const embedding = await generateEmbedding(query);
 
     // 2. 檢索知識庫
-    const { data, error } = await supabase.rpc("search_knowledge", {
+    const { data, error } = await getSupabaseClient().rpc("search_knowledge", {
       query_embedding: embedding,
       match_count: 3,
       source_filter: "docs",
@@ -87,7 +108,9 @@ export async function generateRagResponse(query: string): Promise<string> {
     }
 
     // 3. 組裝 Prompt 並呼叫 Gemini 進行生成
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+    const model = getGeminiClient().getGenerativeModel({
+      model: "gemini-flash-latest",
+    });
     const prompt = `
 你是「新竹市垃圾車追蹤系統」的客服小幫手，請溫柔親切地回答民眾的問題。
 如果提供的背景知識中沒有答案，請婉轉地告知民眾你目前還不知道，或建議他們聯絡新竹市環保局 (03-536-8920)。

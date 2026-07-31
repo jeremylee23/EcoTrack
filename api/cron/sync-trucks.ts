@@ -10,20 +10,17 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { syncTrucksFromHccg } from "../../src/services/truck.service.js";
+import {
+  ensureCronAuthorized,
+  sendError,
+  sendJson,
+} from "../../src/utils/api-handler.util.js";
 
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  // Protect from unauthorized manual triggers in production
-  // Vercel Cron sends a special header; check the Authorization header
-  const authHeader = req.headers.authorization;
-  const cronSecret = process.env.CRON_SECRET;
-
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
+  if (!ensureCronAuthorized(req, res)) return;
 
   const startTime = Date.now();
 
@@ -44,7 +41,7 @@ export default async function handler(
       console.warn("[CronJob] Errors during sync:", result.errors);
     }
 
-    res.status(200).json({
+    sendJson(res, 200, {
       status: "success",
       timestamp: new Date().toISOString(),
       elapsed_ms: elapsed,
@@ -56,11 +53,8 @@ export default async function handler(
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[CronJob] Fatal sync error:", err);
 
-    res.status(500).json({
-      status: "error",
-      timestamp: new Date().toISOString(),
+    sendError(res, 500, "SYNC_TRUCKS_FAILED", msg, {
       elapsed_ms: Date.now() - startTime,
-      message: msg,
     });
   }
 }

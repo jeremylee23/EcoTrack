@@ -6,9 +6,10 @@
  *  - HCCG API fetching and data normalization
  */
 
-import { Redis } from "@upstash/redis";
+import type { Redis } from "@upstash/redis";
+import { TRUCK_SERVICE_CONSTANTS } from "../config/constants.js";
 import { config } from "../config/index.js";
-import { getSupabaseClient } from "./user.service.js";
+import { getRedisClient, getSupabaseClient } from "./clients.js";
 import {
   haversineDistance,
   isValidCoordinate,
@@ -40,7 +41,6 @@ import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 
 // ── Redis client (singleton) ─────────────────────────────────
 
-let _redis: Redis | null = null;
 let _truckGpsLogsAvailable: boolean | null = null;
 const _liveTruckRefreshInFlight = new Map<
   string,
@@ -52,13 +52,7 @@ const _historicalCache = new Map<
 >();
 
 function getRedis(): Redis {
-  if (!_redis) {
-    _redis = new Redis({
-      url: config.redis.restUrl,
-      token: config.redis.restToken,
-    });
-  }
-  return _redis;
+  return getRedisClient();
 }
 
 // ── Redis key helpers ────────────────────────────────────────
@@ -66,26 +60,23 @@ function getRedis(): Redis {
 const TRUCK_KEY = (routeId: string) => `truck_live:${routeId}`;
 const USER_ROUTE_KEY = (userId: string) => `user_route:${userId}`;
 
-// Stale threshold: GPS older than 6 hours is considered "today unavailable"
-// (Truck ran earlier / yesterday, GPS off now — don't mislead with fake ETAs)
-const STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
-// Soft warning: GPS older than this still usable for ETA, but UI should warn.
-const STALE_WARN_MS = 15 * 60 * 1000;
-
-const DEFAULT_GARBAGE_DAYS = [1, 2, 4, 5, 6] as const;
-const OFFICIAL_LIVE_STATUS = "1";
-const CAR_STATUS_DONE = "1";
-// When primary route has no live signal, try other nearby stops within this radius.
-const ALT_ROUTE_RADIUS_M = 100;
-const MAX_GPS_SAMPLE_GAP_MS = 30 * 60 * 1000;
-const MIN_MOVING_SPEED_KMH = 2;
-const MAX_MOVING_SPEED_KMH = 60;
-const HISTORICAL_SPEED_WINDOW_MINUTES = 180;
-const HISTORICAL_SPEED_MIN_SAMPLES = 4;
-const HISTORICAL_ARRIVAL_MIN_SAMPLES = 3;
-const HISTORICAL_ETA_MAX_MINUTES = 180;
-const LIVE_TRUCK_REFRESH_INTERVAL_MS = 90 * 1000;
-const HISTORICAL_CACHE_TTL_SECONDS = 10 * 60;
+const {
+  staleThresholdMs: STALE_THRESHOLD_MS,
+  staleWarnMs: STALE_WARN_MS,
+  defaultGarbageDays: DEFAULT_GARBAGE_DAYS,
+  officialLiveStatus: OFFICIAL_LIVE_STATUS,
+  carStatusDone: CAR_STATUS_DONE,
+  altRouteRadiusMeters: ALT_ROUTE_RADIUS_M,
+  maxGpsSampleGapMs: MAX_GPS_SAMPLE_GAP_MS,
+  minMovingSpeedKmh: MIN_MOVING_SPEED_KMH,
+  maxMovingSpeedKmh: MAX_MOVING_SPEED_KMH,
+  historicalSpeedWindowMinutes: HISTORICAL_SPEED_WINDOW_MINUTES,
+  historicalSpeedMinSamples: HISTORICAL_SPEED_MIN_SAMPLES,
+  historicalArrivalMinSamples: HISTORICAL_ARRIVAL_MIN_SAMPLES,
+  historicalEtaMaxMinutes: HISTORICAL_ETA_MAX_MINUTES,
+  liveTruckRefreshIntervalMs: LIVE_TRUCK_REFRESH_INTERVAL_MS,
+  historicalCacheTtlSeconds: HISTORICAL_CACHE_TTL_SECONDS,
+} = TRUCK_SERVICE_CONSTANTS;
 
 const HISTORICAL_SPEED_CACHE_KEY = (routeId: string, carType: "0" | "1") =>
   `hist_speed:${routeId}:${carType}`;
@@ -351,7 +342,7 @@ async function fetchNearbyPointsCached(
   if (points.length > 0) {
     redis
       .set(cacheKey, points, { ex: config.hsinchu.nearbyCacheTtlSeconds })
-      .catch((error) =>
+      .catch((error: unknown) =>
         console.error("[TruckService] Nearby points cache write failed:", error)
       );
   }
@@ -1136,7 +1127,7 @@ async function getRedisBackedHistoricalCache<T>(
   const fresh = await loader();
   const box = { value: fresh ?? null };
   setHistoricalLocalCache(key, box, ttlSeconds);
-  redis.set(key, box, { ex: ttlSeconds }).catch((error) =>
+  redis.set(key, box, { ex: ttlSeconds }).catch((error: unknown) =>
     console.error("[TruckService] Historical cache write failed:", error)
   );
   return fresh;

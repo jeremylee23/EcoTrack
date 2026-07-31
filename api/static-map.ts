@@ -5,6 +5,12 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import sharp from "sharp";
+import {
+  applyCors,
+  ensureMethod,
+  handleOptions,
+  sendError,
+} from "../src/utils/api-handler.util.js";
 
 const TILE = 256;
 const OUT_W = 800;
@@ -53,22 +59,15 @@ export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  applyCors(res, ["GET"]);
   res.setHeader(
     "Cache-Control",
     "public, s-maxage=86400, stale-while-revalidate=604800"
   );
 
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
+  if (handleOptions(req, res)) return;
 
-  if (req.method !== "GET") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
+  if (!ensureMethod(req, res, ["GET"])) return;
 
   const lat = parseFloat(String(req.query.lat ?? ""));
   const lng = parseFloat(String(req.query.lng ?? ""));
@@ -78,11 +77,11 @@ export default async function handler(
     : 16;
 
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    res.status(400).json({ error: "lat and lng required" });
+    sendError(res, 400, "LAT_LNG_REQUIRED", "lat and lng required");
     return;
   }
   if (lat < -85 || lat > 85 || lng < -180 || lng > 180) {
-    res.status(400).json({ error: "lat/lng out of range" });
+    sendError(res, 400, "LAT_LNG_OUT_OF_RANGE", "lat/lng out of range");
     return;
   }
 
@@ -137,6 +136,11 @@ export default async function handler(
     res.status(200).send(png);
   } catch (err) {
     console.error("[static-map]", err);
-    res.status(500).json({ error: "failed to build map preview" });
+    sendError(
+      res,
+      500,
+      "STATIC_MAP_BUILD_FAILED",
+      "failed to build map preview"
+    );
   }
 }

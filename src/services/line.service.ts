@@ -5,8 +5,9 @@
 
 import { messagingApi } from "@line/bot-sdk";
 import type { webhook } from "@line/bot-sdk";
-import { config } from "../config/index.js";
+import { MAP_CONSTANTS } from "../config/constants.js";
 import type { EtaResult } from "../types/index.js";
+import { getLineClient } from "./clients.js";
 
 // Re-export useful types for use in webhook.ts
 export type TextMessage = messagingApi.TextMessage;
@@ -14,20 +15,7 @@ export type LocationMessage = messagingApi.LocationMessage;
 export type FlexMessage = messagingApi.FlexMessage;
 export type Message = messagingApi.Message;
 
-const MAP_PAGE_VERSION = "20260731-viewport-lock";
-
-// ── Singleton LINE MessagingApiClient ────────────────────────
-
-let _client: messagingApi.MessagingApiClient | null = null;
-
-function getLineClient(): messagingApi.MessagingApiClient {
-  if (!_client) {
-    _client = new messagingApi.MessagingApiClient({
-      channelAccessToken: config.line.channelAccessToken,
-    });
-  }
-  return _client;
-}
+const MAP_PAGE_VERSION = MAP_CONSTANTS.pageVersion;
 
 // ── Reply / Push ─────────────────────────────────────────────
 

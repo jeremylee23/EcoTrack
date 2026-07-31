@@ -5,31 +5,31 @@
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getRoutePathForMap } from "../src/services/truck.service.js";
+import {
+  applyCors,
+  ensureMethod,
+  handleOptions,
+  sendError,
+  sendJson,
+} from "../src/utils/api-handler.util.js";
 
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  applyCors(res, ["GET"]);
   res.setHeader(
     "Cache-Control",
     "public, s-maxage=60, stale-while-revalidate=120"
   );
 
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
+  if (handleOptions(req, res)) return;
 
-  if (req.method !== "GET") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
+  if (!ensureMethod(req, res, ["GET"])) return;
 
   const routeId = String(req.query.routeId ?? "").trim();
   if (!routeId) {
-    res.status(400).json({ error: "routeId required" });
+    sendError(res, 400, "ROUTE_ID_REQUIRED", "routeId required");
     return;
   }
 
@@ -72,12 +72,12 @@ export default async function handler(
     if (path.upcomingStops.length > 0) tipParts.push("藍標＝接下來 5 站 ETA");
     const tip = tipParts.join("；") + "。";
 
-    res.status(200).json({
+    sendJson(res, 200, {
       ...path,
       tip,
     });
   } catch (err) {
     console.error("[route-path]", err);
-    res.status(500).json({ error: "failed to load route path" });
+    sendError(res, 500, "ROUTE_PATH_FAILED", "failed to load route path");
   }
 }

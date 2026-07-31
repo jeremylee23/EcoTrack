@@ -4,7 +4,7 @@
  */
 
 import { Redis } from "@upstash/redis";
-import { config } from "../config/index.js";
+import { getRedisClient } from "./clients.js";
 import {
   shortenAddress,
   favoriteDisplayName,
@@ -51,10 +51,7 @@ const DEFAULT_PREFS: UserPrefs = {
 let _redis: Redis | null = null;
 function getRedis(): Redis {
   if (!_redis) {
-    _redis = new Redis({
-      url: config.redis.restUrl,
-      token: config.redis.restToken,
-    });
+    _redis = getRedisClient();
   }
   return _redis;
 }

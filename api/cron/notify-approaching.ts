@@ -8,13 +8,18 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { Redis } from "@upstash/redis";
-import { config } from "../../src/config/index.js";
+import { NOTIFICATION_CONSTANTS } from "../../src/config/constants.js";
 import { listUsersForNotify } from "../../src/services/user.service.js";
 import { calculateEta } from "../../src/services/truck.service.js";
 import { pushMessage, buildTextMessage } from "../../src/services/line.service.js";
+import { getRedisClient } from "../../src/services/clients.js";
+import {
+  ensureCronAuthorized,
+  sendError,
+  sendJson,
+} from "../../src/utils/api-handler.util.js";
 
-const APPROACHING_MINUTES = 5;
+const APPROACHING_MINUTES = NOTIFICATION_CONSTANTS.approachingMinutes;
 const NOTIFY_KEY = (userId: string, routeId: string, dayKey: string) =>
   `notify_sent:${userId}:${routeId}:${dayKey}`;
 
@@ -30,18 +35,9 @@ export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  const authHeader = req.headers.authorization;
-  const cronSecret = process.env.CRON_SECRET;
+  if (!ensureCronAuthorized(req, res)) return;
 
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-
-  const redis = new Redis({
-    url: config.redis.restUrl,
-    token: config.redis.restToken,
-  });
+  const redis = getRedisClient();
 
   const dayKey = getTaiwanDayKey();
   const started = Date.now();
@@ -96,7 +92,7 @@ export default async function handler(
       }
     }
 
-    res.status(200).json({
+    sendJson(res, 200, {
       status: "success",
       checked,
       notified,
@@ -107,9 +103,7 @@ export default async function handler(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[NotifyCron] Fatal error:", err);
-    res.status(500).json({
-      status: "error",
-      message: msg,
+    sendError(res, 500, "NOTIFY_APPROACHING_FAILED", msg, {
       elapsed_ms: Date.now() - started,
     });
   }

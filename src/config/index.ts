@@ -1,7 +1,7 @@
 /**
  * config/index.ts
  * Environment variable validation & typed config object.
- * Fails fast if any required variable is missing.
+ * Fails fast if any required core variable is missing.
  */
 
 function requireEnv(key: string): string {
@@ -39,9 +39,9 @@ export const config = {
     channelAccessToken: requireEnv("LINE_CHANNEL_ACCESS_TOKEN"),
   },
 
-  // Gemini API
+  // Gemini API (optional, only required for RAG flows)
   gemini: {
-    apiKey: requireEnv("GEMINI_API_KEY"),
+    apiKey: optionalEnv("GEMINI_API_KEY"),
   },
 
   // Hsinchu City Government API
