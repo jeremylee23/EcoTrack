@@ -9,6 +9,7 @@ import { config } from "../src/config/index.js";
 import {
   upsertUserLocation,
   setNotifyEnabled,
+  getSupabaseClient,
 } from "../src/services/user.service.js";
 import {
   calculateEta,
@@ -58,6 +59,14 @@ type MessageEvent = webhook.MessageEvent;
 type FollowEvent = webhook.FollowEvent;
 type LocationMessageContent = webhook.LocationMessageContent;
 type TextMessageContent = webhook.TextMessageContent;
+type UserPrefsSnapshot = Awaited<ReturnType<typeof getUserPrefs>>;
+type HomeCoords = { lat: number; lng: number } | null;
+type ActiveCoords = {
+  lat: number;
+  lng: number;
+  label: string;
+  address?: string;
+};
 
 function validateLineSignature(
   rawBody: string,
@@ -80,10 +89,7 @@ function validateLineSignature(
 async function fetchHomeCoords(
   userId: string
 ): Promise<{ lat: number; lng: number } | null> {
-  const { createClient } = await import("@supabase/supabase-js");
-  const db = createClient(config.supabase.url, config.supabase.serviceRoleKey, {
-    auth: { persistSession: false },
-  });
+  const db = getSupabaseClient();
   const { data: coords } = await db.rpc("get_user_coords", {
     p_line_user_id: userId,
   });
@@ -92,16 +98,10 @@ async function fetchHomeCoords(
   return { lat: coordData.lat, lng: coordData.lng };
 }
 
-/**
- * Active query point. If the selected favorite is the same place as「定位」,
- * reuse home GPS + doorplate so clean-point suggestions stay identical.
- */
-async function getActiveCoords(
-  userId: string
-): Promise<{ lat: number; lng: number; label: string; address?: string } | null> {
-  const prefs = await getUserPrefs(userId);
-  const home = await fetchHomeCoords(userId);
-
+function resolveActiveCoords(
+  prefs: UserPrefsSnapshot,
+  home: HomeCoords
+): ActiveCoords | null {
   if (prefs.activeFavoriteId) {
     const fav = prefs.favorites.find((f) => f.id === prefs.activeFavoriteId);
     if (fav) {
@@ -141,12 +141,39 @@ async function getActiveCoords(
   };
 }
 
+/**
+ * Active query point. If the selected favorite is the same place as「定位」,
+ * reuse home GPS + doorplate so clean-point suggestions stay identical.
+ */
+async function getActiveCoords(
+  userId: string
+): Promise<ActiveCoords | null> {
+  const [prefs, home] = await Promise.all([
+    getUserPrefs(userId),
+    fetchHomeCoords(userId),
+  ]);
+  return resolveActiveCoords(prefs, home);
+}
+
+async function getActiveContext(
+  userId: string
+): Promise<{ prefs: UserPrefsSnapshot; coords: ActiveCoords | null }> {
+  const [prefs, home] = await Promise.all([
+    getUserPrefs(userId),
+    fetchHomeCoords(userId),
+  ]);
+  return {
+    prefs,
+    coords: resolveActiveCoords(prefs, home),
+  };
+}
+
 async function replyEtaNow(
   userId: string,
   replyToken: string,
   notice?: string
 ): Promise<void> {
-  const coords = await getActiveCoords(userId);
+  const { prefs, coords } = await getActiveContext(userId);
   if (!coords) {
     await replyMessage(replyToken, [
       withQuickReply(
@@ -158,7 +185,6 @@ async function replyEtaNow(
     return;
   }
 
-  const prefs = await getUserPrefs(userId);
   const eta = await calculateEta(coords.lat, coords.lng, {
     locateMode: prefs.locateMode,
     radiusMeters: prefs.radiusMeters,
@@ -737,7 +763,7 @@ async function handleTextMessage(
   }
 
   if (/^(附近清運點|附近|清運點|哪裡倒|去哪倒)$/.test(text)) {
-    const coords = await getActiveCoords(userId);
+    const { prefs, coords } = await getActiveContext(userId);
     if (!coords) {
       await replyMessage(replyToken, [
         withQuickReply(
@@ -746,7 +772,6 @@ async function handleTextMessage(
       ]);
       return;
     }
-    const prefs = await getUserPrefs(userId);
     const guide = await getNearbyStopsGuide(coords.lat, coords.lng, {
       radiusMeters: prefs.radiusMeters,
       locateMode: "all_day",
@@ -762,14 +787,13 @@ async function handleTextMessage(
   }
 
   if (/班表|時刻表|清運日/.test(text)) {
-    const coords = await getActiveCoords(userId);
+    const { prefs, coords } = await getActiveContext(userId);
     if (!coords) {
       await replyMessage(replyToken, [
         withQuickReply(buildTextMessage("請先點選單「定位」。")),
       ]);
       return;
     }
-    const prefs = await getUserPrefs(userId);
     const card = await getScheduleCardForLocation(coords.lat, coords.lng, {
       locateMode: prefs.locateMode,
       radiusMeters: prefs.radiusMeters,

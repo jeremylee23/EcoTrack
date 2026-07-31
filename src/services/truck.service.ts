@@ -42,6 +42,10 @@ import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 
 let _redis: Redis | null = null;
 let _truckGpsLogsAvailable: boolean | null = null;
+const _liveTruckRefreshInFlight = new Map<
+  string,
+  Promise<{ garbage: TruckLiveData | null; recycling: TruckLiveData | null }>
+>();
 
 function getRedis(): Redis {
   if (!_redis) {
@@ -76,6 +80,7 @@ const HISTORICAL_SPEED_WINDOW_MINUTES = 180;
 const HISTORICAL_SPEED_MIN_SAMPLES = 4;
 const HISTORICAL_ARRIVAL_MIN_SAMPLES = 3;
 const HISTORICAL_ETA_MAX_MINUTES = 180;
+const LIVE_TRUCK_REFRESH_INTERVAL_MS = 90 * 1000;
 
 export interface CalculateEtaOptions {
   locateMode?: LocateMode;
@@ -379,28 +384,93 @@ async function selectNearbyCandidate(
   return candidates[0] ?? null;
 }
 
-async function loadLiveTrucksForRoute(routeId: string): Promise<{
+function sanitizeTruckSnapshot(snapshot: {
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}): {
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+} {
+  return {
+    garbage: sanitizeLiveTruck(snapshot.garbage),
+    recycling: sanitizeLiveTruck(snapshot.recycling),
+  };
+}
+
+async function getCachedLiveTrucksForRoute(routeId: string): Promise<{
   garbage: TruckLiveData | null;
   recycling: TruckLiveData | null;
 }> {
-  let truckData = await syncSingleTruckFromHccg(routeId).catch((error) => {
-    console.error("[TruckService] Failed to fetch single truck:", error);
-    return { garbage: null, recycling: null };
-  });
+  const [garbage, recycling] = await Promise.all([
+    getRecentTruckFallback(routeId, "0"),
+    getRecentTruckFallback(routeId, "1"),
+  ]);
 
-  truckData = {
-    garbage: sanitizeLiveTruck(truckData.garbage),
-    recycling: sanitizeLiveTruck(truckData.recycling),
-  };
+  return { garbage, recycling };
+}
 
-  if (!truckData.garbage) {
-    truckData.garbage = await getRecentTruckFallback(routeId, "0");
+function getFreshestTruckAgeMs(snapshot: {
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}): number {
+  const ages = [snapshot.garbage, snapshot.recycling]
+    .filter((truck): truck is TruckLiveData => Boolean(truck))
+    .map((truck) => getTruckAgeMs(truck));
+  if (ages.length === 0) return Number.POSITIVE_INFINITY;
+  return Math.min(...ages);
+}
+
+function shouldBackgroundRefresh(snapshot: {
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}): boolean {
+  if (!snapshot.garbage && !snapshot.recycling) return true;
+  return getFreshestTruckAgeMs(snapshot) >= LIVE_TRUCK_REFRESH_INTERVAL_MS;
+}
+
+async function refreshLiveTrucksForRoute(routeId: string): Promise<{
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}> {
+  const existing = _liveTruckRefreshInFlight.get(routeId);
+  if (existing) return existing;
+
+  const pending = syncSingleTruckFromHccg(routeId)
+    .then((snapshot) => sanitizeTruckSnapshot(snapshot))
+    .catch((error) => {
+      console.error("[TruckService] Failed to fetch single truck:", error);
+      return { garbage: null, recycling: null };
+    })
+    .finally(() => {
+      _liveTruckRefreshInFlight.delete(routeId);
+    });
+
+  _liveTruckRefreshInFlight.set(routeId, pending);
+  return pending;
+}
+
+async function loadLiveTrucksForRoute(
+  routeId: string,
+  options: { allowNetworkFetch?: boolean; backgroundRefresh?: boolean } = {}
+): Promise<{
+  garbage: TruckLiveData | null;
+  recycling: TruckLiveData | null;
+}> {
+  const allowNetworkFetch = options.allowNetworkFetch !== false;
+  const backgroundRefresh = options.backgroundRefresh !== false;
+  const cached = await getCachedLiveTrucksForRoute(routeId);
+
+  if (cached.garbage || cached.recycling) {
+    if (backgroundRefresh && shouldBackgroundRefresh(cached)) {
+      void refreshLiveTrucksForRoute(routeId);
+    }
+    return cached;
   }
-  if (!truckData.recycling) {
-    truckData.recycling = await getRecentTruckFallback(routeId, "1");
-  }
 
-  return truckData;
+  if (!allowNetworkFetch) return cached;
+
+  const fresh = await refreshLiveTrucksForRoute(routeId);
+  return fresh.garbage || fresh.recycling ? fresh : cached;
 }
 
 function candidateHasOfficialEta(candidate: NearbyPointCandidate): boolean {
@@ -1331,7 +1401,10 @@ export async function calculateEta(
       if (alt === candidate) continue;
       if (alt.distanceMeters > Math.max(ALT_ROUTE_RADIUS_M, 180)) continue;
       if (alt.point.routeId === candidate.point.routeId) continue;
-      const altTrucks = await loadLiveTrucksForRoute(alt.point.routeId);
+      const altTrucks = await loadLiveTrucksForRoute(alt.point.routeId, {
+        allowNetworkFetch: false,
+        backgroundRefresh: false,
+      });
       if (
         candidateHasOfficialEta(alt) ||
         altTrucks.garbage ||

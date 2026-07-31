@@ -39,27 +39,49 @@ describe("street-match", () => {
 
 describe("pickEarliestNextArrival", () => {
   it("picks afternoon over evening next day", () => {
-    const best = pickEarliestNextArrival([
-      {
-        id: "eve",
-        name: "光華北街36巷9號",
-        daysString: "1,2,4,5,6",
-        scheduledTime: "19:57",
-        hasPassedToday: true,
-        defaultDays: [1, 2, 4, 5, 6],
-      },
-      {
-        id: "aft",
-        name: "光華北街81-51號",
-        daysString: "1,4",
-        scheduledTime: "14:17",
-        hasPassedToday: true,
-        defaultDays: [1, 2, 4, 5, 6],
-      },
-    ]);
-    assert.ok(best);
-    assert.equal(best!.stopId, "aft");
-    assert.match(best!.dateStr, /14:17/);
+    const RealDate = Date;
+    class MockDate extends Date {
+      constructor(...args: any[]) {
+        if (args.length === 0) {
+          super("2026-07-28T12:00:00+08:00");
+          return;
+        }
+        super(args[0]);
+      }
+      static now(): number {
+        return new RealDate("2026-07-28T12:00:00+08:00").getTime();
+      }
+    }
+
+    // Freeze on Tuesday so both candidates land on Thursday; 14:17 should beat 19:57.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    globalThis.Date = MockDate as any;
+    try {
+      const best = pickEarliestNextArrival([
+        {
+          id: "eve",
+          name: "光華北街36巷9號",
+          daysString: "1,2,4,5,6",
+          scheduledTime: "19:57",
+          hasPassedToday: true,
+          defaultDays: [1, 2, 4, 5, 6],
+        },
+        {
+          id: "aft",
+          name: "光華北街81-51號",
+          daysString: "1,4",
+          scheduledTime: "14:17",
+          hasPassedToday: true,
+          defaultDays: [1, 2, 4, 5, 6],
+        },
+      ]);
+      assert.ok(best);
+      assert.equal(best!.stopId, "aft");
+      assert.match(best!.dateStr, /14:17/);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      globalThis.Date = RealDate as any;
+    }
   });
 });
 
