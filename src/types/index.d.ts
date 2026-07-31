@@ -177,9 +177,9 @@ export interface EtaResult {
   isStale?: boolean;
   staleMinutes?: number;
   /** Where the garbage ETA came from */
-  garbageEtaSource?: "official" | "estimated";
+  garbageEtaSource?: "official" | "estimated" | "historical";
   /** Where the recycling ETA came from */
-  recyclingEtaSource?: "official" | "estimated";
+  recyclingEtaSource?: "official" | "estimated" | "historical";
   /** True when we switched to a nearby alternate route with live trucks */
   usedAlternateRoute?: boolean;
   /** City/stop has no garbage or recycle service today */

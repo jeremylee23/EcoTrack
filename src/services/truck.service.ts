@@ -41,6 +41,7 @@ import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 // ── Redis client (singleton) ─────────────────────────────────
 
 let _redis: Redis | null = null;
+let _truckGpsLogsAvailable: boolean | null = null;
 
 function getRedis(): Redis {
   if (!_redis) {
@@ -68,6 +69,13 @@ const OFFICIAL_LIVE_STATUS = "1";
 const CAR_STATUS_DONE = "1";
 // When primary route has no live signal, try other nearby stops within this radius.
 const ALT_ROUTE_RADIUS_M = 100;
+const MAX_GPS_SAMPLE_GAP_MS = 30 * 60 * 1000;
+const MIN_MOVING_SPEED_KMH = 2;
+const MAX_MOVING_SPEED_KMH = 60;
+const HISTORICAL_SPEED_WINDOW_MINUTES = 180;
+const HISTORICAL_SPEED_MIN_SAMPLES = 4;
+const HISTORICAL_ARRIVAL_MIN_SAMPLES = 3;
+const HISTORICAL_ETA_MAX_MINUTES = 180;
 
 export interface CalculateEtaOptions {
   locateMode?: LocateMode;
@@ -97,6 +105,12 @@ interface NearbyPointCandidate {
   recyclingEtaMinutes?: number;
   hasTodayGarbage: boolean;
   hasTodayRecycling: boolean;
+}
+
+interface HistoricalArrivalSummary {
+  clockTime: string;
+  minutesUntilNow: number;
+  sampleCount: number;
 }
 
 function getTaiwanNow(): Date {
@@ -700,7 +714,16 @@ async function enrichGuideItemWithLiveEta(
 
     const etaMinutes = Math.max(
       1,
-      Math.round(estimateEtaFromTruck(truck, item.lat, item.lng, seq))
+      Math.round(
+        await estimateEtaFromTruckWithHistory(
+          candidate.point.routeId,
+          truck,
+          item.lat,
+          item.lng,
+          seq,
+          truck.car_type === "1" ? "1" : "0"
+        )
+      )
     );
     return {
       ...item,
@@ -946,6 +969,59 @@ function getTruckAgeMs(truck: TruckLiveData): number {
   return Date.now() - updatedAt;
 }
 
+function normalizeObservedSpeedKmh(speed: number | null | undefined): number | null {
+  if (!Number.isFinite(speed)) return null;
+  if ((speed ?? 0) < MIN_MOVING_SPEED_KMH || (speed ?? 0) > MAX_MOVING_SPEED_KMH) {
+    return null;
+  }
+  return Math.round((speed ?? 0) * 10) / 10;
+}
+
+function computeObservedSpeedKmh(
+  previous: TruckLiveData | null | undefined,
+  lat: number,
+  lng: number,
+  updatedAtIso: string
+): number {
+  if (!previous) return 0;
+
+  const previousMs = new Date(previous.updated_at).getTime();
+  const currentMs = new Date(updatedAtIso).getTime();
+  if (Number.isNaN(previousMs) || Number.isNaN(currentMs) || currentMs <= previousMs) {
+    return 0;
+  }
+
+  const deltaMs = currentMs - previousMs;
+  if (deltaMs > MAX_GPS_SAMPLE_GAP_MS) return 0;
+
+  const distanceKm = haversineDistance(previous.lat, previous.lng, lat, lng);
+  if (distanceKm < 0.02) return 0;
+
+  const speedKmh = distanceKm / (deltaMs / 3_600_000);
+  return normalizeObservedSpeedKmh(speedKmh) ?? 0;
+}
+
+function getTaiwanMinutesOfDayFromIso(isoString: string): number | null {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return null;
+  return ((date.getUTCHours() + 8) % 24) * 60 + date.getUTCMinutes();
+}
+
+function getClockDistanceMinutes(left: number, right: number): number {
+  const diff = Math.abs(left - right);
+  return Math.min(diff, 1440 - diff);
+}
+
+function isMissingTruckGpsLogsTable(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  const message = typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? "")
+    : String(error ?? "");
+  return code === "42P01" || /truck_gps_logs/i.test(message);
+}
+
 /**
  * Drops GPS that cannot produce a trustworthy live ETA.
  * HCCG often keeps returning yesterday's last ping with seq=-1 after service ends.
@@ -986,6 +1062,156 @@ function estimateEtaFromTruck(
     distanceKm,
     intermediateStops,
     config.hsinchu.avgSpeedKmh,
+    config.hsinchu.stopDwellSeconds
+  );
+}
+
+async function persistTruckGpsLog(
+  routeId: string,
+  data: TruckLiveData
+): Promise<void> {
+  if (_truckGpsLogsAvailable === false) return;
+
+  try {
+    const db = getSupabaseClient();
+    const { error } = await db.from("truck_gps_logs").upsert(
+      {
+        route_id: routeId,
+        car_type: data.car_type ?? "0",
+        car_no: data.car_no ?? null,
+        stop_sequence:
+          data.heading_to_stop_sequence > 0
+            ? data.heading_to_stop_sequence
+            : null,
+        lat: data.lat,
+        lng: data.lng,
+        speed_kmh: normalizeObservedSpeedKmh(data.speed),
+        observed_at: data.updated_at,
+      },
+      {
+        onConflict: "route_id,car_type,observed_at",
+        ignoreDuplicates: true,
+      }
+    );
+
+    if (error) {
+      if (isMissingTruckGpsLogsTable(error)) {
+        _truckGpsLogsAvailable = false;
+        return;
+      }
+      console.error("[TruckService] Failed to insert truck_gps_logs:", error.message);
+      return;
+    }
+
+    _truckGpsLogsAvailable = true;
+  } catch (error) {
+    if (isMissingTruckGpsLogsTable(error)) {
+      _truckGpsLogsAvailable = false;
+      return;
+    }
+    console.error("[TruckService] Error inserting truck_gps_logs:", error);
+  }
+}
+
+async function getHistoricalRouteSpeedKmh(
+  routeId: string,
+  carType: "0" | "1"
+): Promise<number | null> {
+  if (_truckGpsLogsAvailable === false) return null;
+
+  try {
+    const db = getSupabaseClient();
+    const since = new Date(
+      Date.now() - 21 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const { data, error } = await db
+      .from("truck_gps_logs")
+      .select("speed_kmh, observed_at")
+      .eq("route_id", routeId)
+      .eq("car_type", carType)
+      .gte("observed_at", since)
+      .order("observed_at", { ascending: false })
+      .limit(240);
+
+    if (error) {
+      if (isMissingTruckGpsLogsTable(error)) {
+        _truckGpsLogsAvailable = false;
+        return null;
+      }
+      console.error("[TruckService] Failed to read truck_gps_logs:", error.message);
+      return null;
+    }
+    if (!data || data.length === 0) {
+      _truckGpsLogsAvailable = true;
+      return null;
+    }
+
+    const baseSamples = data
+      .map((sample) => ({
+        speed: normalizeObservedSpeedKmh(Number(sample.speed_kmh)),
+        minutesOfDay: sample.observed_at
+          ? getTaiwanMinutesOfDayFromIso(sample.observed_at)
+          : null,
+      }))
+      .filter(
+        (sample): sample is { speed: number; minutesOfDay: number | null } =>
+          sample.speed !== null
+      );
+
+    if (baseSamples.length < HISTORICAL_SPEED_MIN_SAMPLES) return null;
+
+    const nowMinutes = getTaiwanMinutesOfDay();
+    const windowedSamples = baseSamples.filter(
+      (sample) =>
+        sample.minutesOfDay !== null &&
+        getClockDistanceMinutes(sample.minutesOfDay, nowMinutes) <=
+          HISTORICAL_SPEED_WINDOW_MINUTES
+    );
+
+    const selectedSamples =
+      windowedSamples.length >= HISTORICAL_SPEED_MIN_SAMPLES
+        ? windowedSamples
+        : baseSamples;
+
+    const avgSpeed =
+      selectedSamples.reduce((sum, sample) => sum + sample.speed, 0) /
+      selectedSamples.length;
+
+    _truckGpsLogsAvailable = true;
+    return Math.round(avgSpeed * 10) / 10;
+  } catch (error) {
+    if (isMissingTruckGpsLogsTable(error)) {
+      _truckGpsLogsAvailable = false;
+      return null;
+    }
+    console.error("[TruckService] Error calculating historical speed:", error);
+    return null;
+  }
+}
+
+async function estimateEtaFromTruckWithHistory(
+  routeId: string,
+  truck: TruckLiveData,
+  stopLat: number,
+  stopLng: number,
+  targetSequence: number,
+  carType: "0" | "1"
+): Promise<number> {
+  const intermediateStops = Math.max(
+    0,
+    targetSequence - truck.heading_to_stop_sequence - 1
+  );
+  const distanceKm = haversineDistance(truck.lat, truck.lng, stopLat, stopLng);
+  const speedKmh =
+    normalizeObservedSpeedKmh(truck.speed) ??
+    (await getHistoricalRouteSpeedKmh(routeId, carType)) ??
+    config.hsinchu.avgSpeedKmh;
+
+  return estimateEtaMinutes(
+    distanceKm,
+    intermediateStops,
+    speedKmh,
     config.hsinchu.stopDwellSeconds
   );
 }
@@ -1266,11 +1492,18 @@ export async function calculateEta(
     };
   }
 
-  const historicalAvg =
+  const garbageHistoricalArrival =
     targetSequence > 0
-      ? await getHistoricalAverage(routeId, targetSequence)
+      ? await getHistoricalArrivalSummary(routeId, targetSequence, "0")
       : undefined;
-  const historicalReference = historicalAvg ?? (point.historyTime || undefined);
+  const recyclingHistoricalArrival =
+    targetSequence > 0
+      ? await getHistoricalArrivalSummary(routeId, targetSequence, "1")
+      : undefined;
+  const historicalReference =
+    garbageHistoricalArrival?.clockTime ??
+    recyclingHistoricalArrival?.clockTime ??
+    (point.historyTime || undefined);
   const etaBias =
     targetSequence > 0
       ? await getEtaErrorBiasMinutes(routeId, targetSequence)
@@ -1288,10 +1521,26 @@ export async function calculateEta(
     garbageEtaSource = "official";
   } else if (garbageTruck) {
     garbageEtaMinutes = applyEtaBias(
-      estimateEtaFromTruck(garbageTruck, stopLat, stopLng, targetSequence),
+      await estimateEtaFromTruckWithHistory(
+        routeId,
+        garbageTruck,
+        stopLat,
+        stopLng,
+        targetSequence,
+        "0"
+      ),
       etaBias
     );
     garbageEtaSource = "estimated";
+  } else if (
+    garbageHistoricalArrival &&
+    candidate.hasTodayGarbage &&
+    !isSchedulePastGrace(candidate.hasTodayGarbage, candidate.minutesUntilScheduled) &&
+    garbageHistoricalArrival.minutesUntilNow >= 0 &&
+    garbageHistoricalArrival.minutesUntilNow <= HISTORICAL_ETA_MAX_MINUTES
+  ) {
+    garbageEtaMinutes = garbageHistoricalArrival.minutesUntilNow;
+    garbageEtaSource = "historical";
   }
 
   let recyclingEtaMinutes: number | undefined;
@@ -1300,10 +1549,26 @@ export async function calculateEta(
     recyclingEtaSource = "official";
   } else if (recyclingTruck) {
     recyclingEtaMinutes = applyEtaBias(
-      estimateEtaFromTruck(recyclingTruck, stopLat, stopLng, targetSequence),
+      await estimateEtaFromTruckWithHistory(
+        routeId,
+        recyclingTruck,
+        stopLat,
+        stopLng,
+        targetSequence,
+        "1"
+      ),
       etaBias
     );
     recyclingEtaSource = "estimated";
+  } else if (
+    recyclingHistoricalArrival &&
+    candidate.hasTodayRecycling &&
+    !isSchedulePastGrace(candidate.hasTodayRecycling, candidate.minutesUntilScheduled) &&
+    recyclingHistoricalArrival.minutesUntilNow >= 0 &&
+    recyclingHistoricalArrival.minutesUntilNow <= HISTORICAL_ETA_MAX_MINUTES
+  ) {
+    recyclingEtaMinutes = recyclingHistoricalArrival.minutesUntilNow;
+    recyclingEtaSource = "historical";
   }
 
   const liveTruckForStale = garbageTruck ?? recyclingTruck;
@@ -1475,12 +1740,16 @@ export async function calculateEta(
   const garbageSourceLabel =
     garbageEtaSource === "official"
       ? "官方即時"
+      : garbageEtaSource === "historical"
+        ? "歷史 GPS 推估"
       : garbageEtaSource === "estimated"
         ? "推估"
         : null;
   const recycleSourceLabel =
     recyclingEtaSource === "official"
       ? "官方即時"
+      : recyclingEtaSource === "historical"
+        ? "歷史 GPS 推估"
       : recyclingEtaSource === "estimated"
         ? "推估"
         : null;
@@ -1598,41 +1867,56 @@ async function getEtaErrorBiasMinutes(
   }
 }
 
-async function getHistoricalAverage(routeId: string, stopId: number): Promise<string | undefined> {
+async function getHistoricalArrivalSummary(
+  routeId: string,
+  stopId: number,
+  carType: "0" | "1"
+): Promise<HistoricalArrivalSummary | undefined> {
   try {
     const db = getSupabaseClient();
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    
+    const thirtyDaysAgo = new Date(
+      Date.now() - 30 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
     const { data, error } = await db
-      .from('eta_logs')
-      .select('predicted_arrival_time')
-      .eq('route_id', routeId)
-      .eq('stop_id', stopId)
-      .gte('created_at', thirtyDaysAgo);
-      
+      .from("eta_logs")
+      .select("actual_arrival_time")
+      .eq("route_id", routeId)
+      .eq("stop_id", stopId)
+      .eq("car_type", carType)
+      .not("actual_arrival_time", "is", null)
+      .gte("created_at", thirtyDaysAgo)
+      .order("created_at", { ascending: false })
+      .limit(60);
+
     if (error || !data || data.length === 0) return undefined;
-    
+
     let totalMinutes = 0;
     let count = 0;
-    
+
     for (const log of data) {
-      if (!log.predicted_arrival_time) continue;
-      const date = new Date(log.predicted_arrival_time);
-      const hours = (date.getUTCHours() + 8) % 24;
-      const minutes = date.getUTCMinutes();
-      totalMinutes += (hours * 60 + minutes);
+      if (!log.actual_arrival_time) continue;
+      const minutesOfDay = getTaiwanMinutesOfDayFromIso(log.actual_arrival_time);
+      if (minutesOfDay === null) continue;
+      totalMinutes += minutesOfDay;
       count++;
     }
-    
-    if (count === 0) return undefined;
-    
+
+    if (count < HISTORICAL_ARRIVAL_MIN_SAMPLES) return undefined;
+
     const avgTotalMinutes = Math.round(totalMinutes / count);
     const avgHours = Math.floor(avgTotalMinutes / 60);
     const avgMins = avgTotalMinutes % 60;
-    
-    return `${avgHours.toString().padStart(2, '0')}:${avgMins.toString().padStart(2, '0')}`;
+
+    return {
+      clockTime: `${avgHours.toString().padStart(2, "0")}:${avgMins
+        .toString()
+        .padStart(2, "0")}`,
+      minutesUntilNow: avgTotalMinutes - getTaiwanMinutesOfDay(),
+      sampleCount: count,
+    };
   } catch (e) {
-    console.error("[TruckService] Error calculating historical average:", e);
+    console.error("[TruckService] Error calculating historical arrival summary:", e);
     return undefined;
   }
 }
@@ -1669,13 +1953,17 @@ export async function syncSingleTruckFromHccg(routeId: string): Promise<{ garbag
 
     if (!isValidCoordinate(lat, lng)) continue;
 
+    const cacheKey = `${car.routeId}:${car.carType}`;
+    const prev = await getTruckLiveData(cacheKey);
+    const updatedAt = new Date(
+      car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
+    ).toISOString();
+
     const liveData: TruckLiveData = {
       lat,
       lng,
-      speed: 0,
-      updated_at: new Date(
-        car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
-      ).toISOString(),
+      speed: computeObservedSpeedKmh(prev, lat, lng, updatedAt),
+      updated_at: updatedAt,
       heading_to_stop_sequence: parseInt(car.seq, 10) || 0,
       car_no: car.carNo,
       route_name: car.routeName,
@@ -1691,7 +1979,8 @@ export async function syncSingleTruckFromHccg(routeId: string): Promise<{ garbag
     }
 
     // Async save to Redis (key separated by car_type)
-    setTruckLiveData(`${car.routeId}:${car.carType}`, liveData).catch(console.error);
+    setTruckLiveData(cacheKey, liveData).catch(console.error);
+    persistTruckGpsLog(car.routeId, liveData).catch(console.error);
 
     // Async resolve ETA logs
     const currentSeq = parseInt(car.seq, 10);
@@ -1790,13 +2079,15 @@ export async function syncTrucksFromHccg(): Promise<{
         }
       }
 
+      const updatedAt = new Date(
+        car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
+      ).toISOString();
+
       const liveData: TruckLiveData = {
         lat,
         lng,
-        speed: 0, // HCCG API doesn't provide speed directly
-        updated_at: new Date(
-          car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
-        ).toISOString(),
+        speed: computeObservedSpeedKmh(prev, lat, lng, updatedAt),
+        updated_at: updatedAt,
         heading_to_stop_sequence: parseInt(car.seq, 10) || 0,
         car_no: car.carNo,
         route_name: car.routeName,
@@ -1806,6 +2097,8 @@ export async function syncTrucksFromHccg(): Promise<{
       };
 
       await setTruckLiveData(cacheKey, liveData);
+      previousCache.set(cacheKey, liveData);
+      persistTruckGpsLog(car.routeId, liveData).catch(console.error);
       
       // Resolve pending ETA logs
       // If the truck's current sequence is > logged stop sequence, it means it has passed the stop.
@@ -1813,9 +2106,7 @@ export async function syncTrucksFromHccg(): Promise<{
       const currentSeq = parseInt(car.seq, 10);
       if (!isNaN(currentSeq) && currentSeq > 0) {
         const db = getSupabaseClient();
-        const updateTime = new Date(
-          car.updateTime.replace(/(\d{4})\/(\d{2})\/(\d{2}) /, "$1-$2-$3T")
-        ).toISOString();
+        const updateTime = updatedAt;
         
         // This is a simplified check. We mark logs as arrived if the truck is at or past the stop.
         // We do it non-blocking.
@@ -2122,7 +2413,14 @@ async function buildClosestWaitPoint(
       if (isSequencePastStop(truck.heading_to_stop_sequence, seq)) {
         statusLabel = "此點可能已過，請看車頭方向沿線等";
       } else {
-        etaMinutes = estimateEtaFromTruck(truck, best.lat, best.lng, seq);
+        etaMinutes = await estimateEtaFromTruckWithHistory(
+          routeId,
+          truck,
+          best.lat,
+          best.lng,
+          seq,
+          truck.car_type === "1" ? "1" : "0"
+        );
         statusLabel = `預估約 ${etaMinutes} 分鐘抵達此處`;
       }
     } else if (best.scheduledTime) {

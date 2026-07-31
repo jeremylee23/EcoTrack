@@ -213,7 +213,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   : (eta.etaMinutes !== undefined && eta.etaMinutes <= 1 
                     ? "即將抵達" 
                     : (eta.etaMinutes !== undefined
-                      ? `預估 ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)`
+                      ? `${eta.garbageEtaSource === "historical" ? "歷史推估" : "預估"} ${formatAbsoluteTime(eta.etaMinutes)} (${eta.etaMinutes}分)`
                       : (eta.scheduledTime ? `表定 ${eta.scheduledTime}（等待訊號）` : "未知"))),
                 weight: "bold",
                 size: eta.nextGarbageDate || eta.noServiceToday ? "sm" : (eta.etaMinutes === undefined && eta.scheduledTime ? "sm" : "md"),
@@ -238,7 +238,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   : eta.nextRecycleDate
                   ? (eta.isRecyclePassed ? `已過站，下次 ${eta.nextRecycleDate}` : `下次 ${eta.nextRecycleDate}`)
                   : (eta.recyclingEtaMinutes !== undefined 
-                    ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `預估 ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
+                    ? (eta.recyclingEtaMinutes <= 1 ? "即將抵達" : `${eta.recyclingEtaSource === "historical" ? "歷史推估" : "預估"} ${formatAbsoluteTime(eta.recyclingEtaMinutes)} (${eta.recyclingEtaMinutes}分)`) 
                     : (eta.scheduledTime && !eta.nextGarbageDate ? `表定 ${eta.scheduledTime}` : "無資料")),
                 weight: "bold",
                 size: eta.nextRecycleDate || eta.noServiceToday ? "sm" : "md",
@@ -282,6 +282,23 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                   ? `⚠️ GPS 訊號已超過 ${Math.round((eta.staleMinutes ?? 0) / 60)} 小時未更新（預估僅供參考）\n💡 這不代表車輛閒置，昨日垃圾車仍可能正常出動，建議於表定時間前 30 分鐘再查。`
                   : `⚠️ GPS 已 ${eta.staleMinutes} 分鐘未更新，預估時間可能不準確。`,
                 color: (eta.staleMinutes ?? 0) > 120 ? "#92400e" : "#dc2626",
+                size: "xs" as const,
+                wrap: true
+              }
+            ]
+          }] : []),
+          ...((eta.garbageEtaSource === "historical" || eta.recyclingEtaSource === "historical") ? [{
+            type: "box" as const,
+            layout: "vertical" as const,
+            margin: "md" as const,
+            paddingAll: "sm" as const,
+            backgroundColor: "#eff6ff" as const,
+            cornerRadius: "sm" as const,
+            contents: [
+              {
+                type: "text" as const,
+                text: "📚 目前沒有可用即時 GPS，這次改用近 30 天垃圾車到站紀錄推估多久會到。",
+                color: "#1d4ed8" as const,
                 size: "xs" as const,
                 wrap: true
               }
@@ -492,7 +509,7 @@ export function buildEtaMessages(eta: EtaResult): Message[] {
                 contents: [
                   {
                     type: "text" as const,
-                    text: "歷史平均",
+                    text: "GPS 歷史",
                     color: "#aaaaaa",
                     size: "sm" as const,
                     flex: 1

@@ -1,6 +1,6 @@
 import { SCHEDULE_LATE_GRACE_MINUTES } from "./time.util.js";
 
-export type EtaSource = "official" | "estimated";
+export type EtaSource = "official" | "estimated" | "historical";
 
 /**
  * Schedule-only "passed" check used when there is no live GPS proof.
