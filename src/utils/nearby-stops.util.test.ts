@@ -8,6 +8,7 @@ import {
 import { pickEarliestNextArrival } from "./area-next-arrival.util.js";
 import {
   MAIN_STREET_DISTANCE_SLACK_M,
+  pickPreferredEtaCandidateIndex,
   recommendNearbyStop,
 } from "./nearby-stops.util.js";
 
@@ -156,5 +157,31 @@ describe("recommendNearbyStop street + next", () => {
     ]);
     assert.equal(pick?.stop.id, "far-aft");
     assert.match(pick!.reason, /最早|主街/);
+  });
+});
+
+describe("pickPreferredEtaCandidateIndex", () => {
+  it("maps ETA candidates through the shared domain ranking policy", () => {
+    const index = pickPreferredEtaCandidateIndex(
+      [
+        {
+          distanceMeters: 35,
+          minutesUntilScheduled: 40,
+          hasTodayService: true,
+          pointName: "光華北街36巷9號",
+          address: "新竹市光華北街36巷9號",
+        },
+        {
+          distanceMeters: 85,
+          minutesUntilScheduled: 45,
+          hasTodayService: true,
+          pointName: "光華北街81號",
+          address: "新竹市光華北街81號",
+        },
+      ],
+      "新竹市北區光華北街80號"
+    );
+
+    assert.equal(index, 1);
   });
 });

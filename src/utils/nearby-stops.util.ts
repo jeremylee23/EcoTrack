@@ -7,6 +7,9 @@
  * Truck often collects along the main street — do not send people into 巷.
  */
 
+import { isSchedulePastGrace } from "./eta-policy.util.js";
+import { streetAffinityScore } from "./street-match.util.js";
+
 export type NearbyStopStatus = "live" | "upcoming" | "passed" | "no_service";
 
 /** Allow main-road pin to be this much farther than nearest alley. */
@@ -268,4 +271,34 @@ export function pickPreferredCandidateIndex(
   });
   const pick = recommendNearbyStop(ranked);
   return pick ? pick.stop.index : 0;
+}
+
+export function pickPreferredEtaCandidateIndex(
+  items: Array<{
+    distanceMeters: number;
+    minutesUntilScheduled: number | null;
+    etaMinutes?: number;
+    hasTodayService: boolean;
+    pointName?: string;
+    address?: string;
+  }>,
+  homeAddress?: string
+): number {
+  return pickPreferredCandidateIndex(
+    items.map((item) => ({
+      distanceMeters: item.distanceMeters,
+      minutesUntilScheduled: item.minutesUntilScheduled,
+      etaMinutes: item.etaMinutes,
+      hasTodayService: item.hasTodayService,
+      streetScore: streetAffinityScore(
+        homeAddress,
+        item.pointName || "",
+        item.address || ""
+      ),
+      passed: isSchedulePastGrace(
+        item.hasTodayService,
+        item.minutesUntilScheduled
+      ),
+    }))
+  );
 }

@@ -35,7 +35,7 @@ import {
 } from "../utils/eta-policy.util.js";
 import { clampRadiusMeters, type LocateMode } from "./prefs.service.js";
 import { formatAreaWeekSchedule } from "./schedule.service.js";
-import { recommendNearbyStop, pickPreferredCandidateIndex } from "../utils/nearby-stops.util.js";
+import { recommendNearbyStop, pickPreferredEtaCandidateIndex } from "../utils/nearby-stops.util.js";
 import { streetAffinityScore } from "../utils/street-match.util.js";
 import { pickEarliestNextArrival } from "../utils/area-next-arrival.util.js";
 
@@ -1412,22 +1412,16 @@ export async function calculateEta(
   // SAME picker as getNearbyStopsGuide / Flex / map
   let candidate: NearbyPointCandidate | undefined;
   if (candidates.length > 0) {
-    const idx = pickPreferredCandidateIndex(
+    const idx = pickPreferredEtaCandidateIndex(
       candidates.map((c) => ({
         distanceMeters: c.distanceMeters,
         minutesUntilScheduled: c.minutesUntilScheduled,
         etaMinutes: c.garbageEtaMinutes ?? c.recyclingEtaMinutes,
         hasTodayService: c.hasTodayGarbage || c.hasTodayRecycling,
-        streetScore: streetAffinityScore(
-          homeAddress,
-          c.point.pointName || "",
-          c.point.address || ""
-        ),
-        passed: isSchedulePastGrace(
-          c.hasTodayGarbage || c.hasTodayRecycling,
-          c.minutesUntilScheduled
-        ),
-      }))
+        pointName: c.point.pointName,
+        address: c.point.address,
+      })),
+      homeAddress
     );
     candidate = candidates[idx >= 0 ? idx : 0];
   }
@@ -1470,22 +1464,16 @@ export async function calculateEta(
       }
     }
     if (alts.length > 0) {
-      const idx = pickPreferredCandidateIndex(
+      const idx = pickPreferredEtaCandidateIndex(
         alts.map((c) => ({
           distanceMeters: c.distanceMeters,
           minutesUntilScheduled: c.minutesUntilScheduled,
           etaMinutes: c.garbageEtaMinutes ?? c.recyclingEtaMinutes,
           hasTodayService: c.hasTodayGarbage || c.hasTodayRecycling,
-          streetScore: streetAffinityScore(
-            homeAddress,
-            c.point.pointName || "",
-            c.point.address || ""
-          ),
-          passed: isSchedulePastGrace(
-            c.hasTodayGarbage || c.hasTodayRecycling,
-            c.minutesUntilScheduled
-          ),
-        }))
+          pointName: c.point.pointName,
+          address: c.point.address,
+        })),
+        homeAddress
       );
       const chosen = alts[idx >= 0 ? idx : 0];
       console.log(
