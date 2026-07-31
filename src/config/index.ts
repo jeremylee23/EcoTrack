@@ -60,8 +60,9 @@ export const config = {
     stopDwellSeconds: 60,
     // Max search radius for nearest stop (meters)
     nearestStopRadiusMeters: 1500,
-    // Redis TTL for live truck data (seconds)
-    truckLiveTtlSeconds: 300,
+    // Redis TTL for live truck data (seconds). Slightly longer than the 5 min cron
+    // to avoid a gap when one sync is delayed a little.
+    truckLiveTtlSeconds: 420,
     // Redis TTL for cached nearby-point lookups (seconds).
     // Official site refreshes every 15s, so a short window keeps ETA fresh
     // while collapsing repeated queries from the same user/location.

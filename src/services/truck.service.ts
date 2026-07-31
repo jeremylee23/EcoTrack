@@ -46,6 +46,10 @@ const _liveTruckRefreshInFlight = new Map<
   string,
   Promise<{ garbage: TruckLiveData | null; recycling: TruckLiveData | null }>
 >();
+const _historicalCache = new Map<
+  string,
+  { expiresAt: number; value: { value: unknown | null } }
+>();
 
 function getRedis(): Redis {
   if (!_redis) {
@@ -81,6 +85,17 @@ const HISTORICAL_SPEED_MIN_SAMPLES = 4;
 const HISTORICAL_ARRIVAL_MIN_SAMPLES = 3;
 const HISTORICAL_ETA_MAX_MINUTES = 180;
 const LIVE_TRUCK_REFRESH_INTERVAL_MS = 90 * 1000;
+const HISTORICAL_CACHE_TTL_SECONDS = 10 * 60;
+
+const HISTORICAL_SPEED_CACHE_KEY = (routeId: string, carType: "0" | "1") =>
+  `hist_speed:${routeId}:${carType}`;
+const HISTORICAL_ARRIVAL_CACHE_KEY = (
+  routeId: string,
+  stopId: number,
+  carType: "0" | "1"
+) => `hist_arrival:${routeId}:${stopId}:${carType}`;
+const ETA_BIAS_CACHE_KEY = (routeId: string, stopId: number) =>
+  `eta_bias:${routeId}:${stopId}`;
 
 export interface CalculateEtaOptions {
   locateMode?: LocateMode;
@@ -1082,6 +1097,51 @@ function getClockDistanceMinutes(left: number, right: number): number {
   return Math.min(diff, 1440 - diff);
 }
 
+function getHistoricalLocalCache<T>(key: string): T | undefined {
+  const cached = _historicalCache.get(key);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    _historicalCache.delete(key);
+    return undefined;
+  }
+  return cached.value as T;
+}
+
+function setHistoricalLocalCache<T>(key: string, value: T, ttlSeconds: number): void {
+  _historicalCache.set(key, {
+    value: value as { value: unknown | null },
+    expiresAt: Date.now() + ttlSeconds * 1000,
+  });
+}
+
+async function getRedisBackedHistoricalCache<T>(
+  key: string,
+  loader: () => Promise<T | null>,
+  ttlSeconds: number = HISTORICAL_CACHE_TTL_SECONDS
+): Promise<T | null> {
+  const local = getHistoricalLocalCache<{ value: T | null }>(key);
+  if (local) return local.value;
+
+  const redis = getRedis();
+  try {
+    const cached = await redis.get<{ value: T | null }>(key);
+    if (cached && Object.prototype.hasOwnProperty.call(cached, "value")) {
+      setHistoricalLocalCache(key, cached, ttlSeconds);
+      return cached.value;
+    }
+  } catch (error) {
+    console.error("[TruckService] Historical cache read failed:", error);
+  }
+
+  const fresh = await loader();
+  const box = { value: fresh ?? null };
+  setHistoricalLocalCache(key, box, ttlSeconds);
+  redis.set(key, box, { ex: ttlSeconds }).catch((error) =>
+    console.error("[TruckService] Historical cache write failed:", error)
+  );
+  return fresh;
+}
+
 function isMissingTruckGpsLogsTable(error: unknown): boolean {
   const code = typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code ?? "")
@@ -1189,75 +1249,80 @@ async function getHistoricalRouteSpeedKmh(
 ): Promise<number | null> {
   if (_truckGpsLogsAvailable === false) return null;
 
-  try {
-    const db = getSupabaseClient();
-    const since = new Date(
-      Date.now() - 21 * 24 * 60 * 60 * 1000
-    ).toISOString();
+  return getRedisBackedHistoricalCache(
+    HISTORICAL_SPEED_CACHE_KEY(routeId, carType),
+    async () => {
+      try {
+        const db = getSupabaseClient();
+        const since = new Date(
+          Date.now() - 21 * 24 * 60 * 60 * 1000
+        ).toISOString();
 
-    const { data, error } = await db
-      .from("truck_gps_logs")
-      .select("speed_kmh, observed_at")
-      .eq("route_id", routeId)
-      .eq("car_type", carType)
-      .gte("observed_at", since)
-      .order("observed_at", { ascending: false })
-      .limit(240);
+        const { data, error } = await db
+          .from("truck_gps_logs")
+          .select("speed_kmh, observed_at")
+          .eq("route_id", routeId)
+          .eq("car_type", carType)
+          .gte("observed_at", since)
+          .order("observed_at", { ascending: false })
+          .limit(240);
 
-    if (error) {
-      if (isMissingTruckGpsLogsTable(error)) {
-        _truckGpsLogsAvailable = false;
+        if (error) {
+          if (isMissingTruckGpsLogsTable(error)) {
+            _truckGpsLogsAvailable = false;
+            return null;
+          }
+          console.error("[TruckService] Failed to read truck_gps_logs:", error.message);
+          return null;
+        }
+        if (!data || data.length === 0) {
+          _truckGpsLogsAvailable = true;
+          return null;
+        }
+
+        const baseSamples = data
+          .map((sample) => ({
+            speed: normalizeObservedSpeedKmh(Number(sample.speed_kmh)),
+            minutesOfDay: sample.observed_at
+              ? getTaiwanMinutesOfDayFromIso(sample.observed_at)
+              : null,
+          }))
+          .filter(
+            (sample): sample is { speed: number; minutesOfDay: number | null } =>
+              sample.speed !== null
+          );
+
+        if (baseSamples.length < HISTORICAL_SPEED_MIN_SAMPLES) return null;
+
+        const nowMinutes = getTaiwanMinutesOfDay();
+        const windowedSamples = baseSamples.filter(
+          (sample) =>
+            sample.minutesOfDay !== null &&
+            getClockDistanceMinutes(sample.minutesOfDay, nowMinutes) <=
+              HISTORICAL_SPEED_WINDOW_MINUTES
+        );
+
+        const selectedSamples =
+          windowedSamples.length >= HISTORICAL_SPEED_MIN_SAMPLES
+            ? windowedSamples
+            : baseSamples;
+
+        const avgSpeed =
+          selectedSamples.reduce((sum, sample) => sum + sample.speed, 0) /
+          selectedSamples.length;
+
+        _truckGpsLogsAvailable = true;
+        return Math.round(avgSpeed * 10) / 10;
+      } catch (error) {
+        if (isMissingTruckGpsLogsTable(error)) {
+          _truckGpsLogsAvailable = false;
+          return null;
+        }
+        console.error("[TruckService] Error calculating historical speed:", error);
         return null;
       }
-      console.error("[TruckService] Failed to read truck_gps_logs:", error.message);
-      return null;
     }
-    if (!data || data.length === 0) {
-      _truckGpsLogsAvailable = true;
-      return null;
-    }
-
-    const baseSamples = data
-      .map((sample) => ({
-        speed: normalizeObservedSpeedKmh(Number(sample.speed_kmh)),
-        minutesOfDay: sample.observed_at
-          ? getTaiwanMinutesOfDayFromIso(sample.observed_at)
-          : null,
-      }))
-      .filter(
-        (sample): sample is { speed: number; minutesOfDay: number | null } =>
-          sample.speed !== null
-      );
-
-    if (baseSamples.length < HISTORICAL_SPEED_MIN_SAMPLES) return null;
-
-    const nowMinutes = getTaiwanMinutesOfDay();
-    const windowedSamples = baseSamples.filter(
-      (sample) =>
-        sample.minutesOfDay !== null &&
-        getClockDistanceMinutes(sample.minutesOfDay, nowMinutes) <=
-          HISTORICAL_SPEED_WINDOW_MINUTES
-    );
-
-    const selectedSamples =
-      windowedSamples.length >= HISTORICAL_SPEED_MIN_SAMPLES
-        ? windowedSamples
-        : baseSamples;
-
-    const avgSpeed =
-      selectedSamples.reduce((sum, sample) => sum + sample.speed, 0) /
-      selectedSamples.length;
-
-    _truckGpsLogsAvailable = true;
-    return Math.round(avgSpeed * 10) / 10;
-  } catch (error) {
-    if (isMissingTruckGpsLogsTable(error)) {
-      _truckGpsLogsAvailable = false;
-      return null;
-    }
-    console.error("[TruckService] Error calculating historical speed:", error);
-    return null;
-  }
+  );
 }
 
 async function estimateEtaFromTruckWithHistory(
@@ -1565,22 +1630,18 @@ export async function calculateEta(
     };
   }
 
-  const garbageHistoricalArrival =
+  const [garbageHistoricalArrival, recyclingHistoricalArrival, etaBias] =
     targetSequence > 0
-      ? await getHistoricalArrivalSummary(routeId, targetSequence, "0")
-      : undefined;
-  const recyclingHistoricalArrival =
-    targetSequence > 0
-      ? await getHistoricalArrivalSummary(routeId, targetSequence, "1")
-      : undefined;
+      ? await Promise.all([
+          getHistoricalArrivalSummary(routeId, targetSequence, "0"),
+          getHistoricalArrivalSummary(routeId, targetSequence, "1"),
+          getEtaErrorBiasMinutes(routeId, targetSequence),
+        ])
+      : [undefined, undefined, 0];
   const historicalReference =
     garbageHistoricalArrival?.clockTime ??
     recyclingHistoricalArrival?.clockTime ??
     (point.historyTime || undefined);
-  const etaBias =
-    targetSequence > 0
-      ? await getEtaErrorBiasMinutes(routeId, targetSequence)
-      : 0;
 
   const garbageTruck = truckData.garbage;
   const recyclingTruck = truckData.recycling;
@@ -1894,50 +1955,53 @@ async function getEtaErrorBiasMinutes(
   routeId: string,
   stopId: number
 ): Promise<number> {
-  try {
-    const db = getSupabaseClient();
-    const thirtyDaysAgo = new Date(
-      Date.now() - 30 * 24 * 60 * 60 * 1000
-    ).toISOString();
+  const cached = await getRedisBackedHistoricalCache(
+    ETA_BIAS_CACHE_KEY(routeId, stopId),
+    async () => {
+      try {
+        const db = getSupabaseClient();
+        const thirtyDaysAgo = new Date(
+          Date.now() - 30 * 24 * 60 * 60 * 1000
+        ).toISOString();
 
-    const { data, error } = await db
-      .from("eta_logs")
-      .select("estimated_eta_minutes, predicted_arrival_time, actual_arrival_time")
-      .eq("route_id", routeId)
-      .eq("stop_id", stopId)
-      .not("actual_arrival_time", "is", null)
-      .not("estimated_eta_minutes", "is", null)
-      .gte("created_at", thirtyDaysAgo)
-      .limit(50);
+        const { data, error } = await db
+          .from("eta_logs")
+          .select("estimated_eta_minutes, predicted_arrival_time, actual_arrival_time")
+          .eq("route_id", routeId)
+          .eq("stop_id", stopId)
+          .not("actual_arrival_time", "is", null)
+          .not("estimated_eta_minutes", "is", null)
+          .gte("created_at", thirtyDaysAgo)
+          .limit(50);
 
-    if (error || !data || data.length === 0) return 0;
+        if (error || !data || data.length === 0) return 0;
 
-    let totalBias = 0;
-    let count = 0;
-    for (const log of data) {
-      const estimated = Number(log.estimated_eta_minutes);
-      if (!Number.isFinite(estimated) || !log.predicted_arrival_time || !log.actual_arrival_time) {
-        continue;
+        let totalBias = 0;
+        let count = 0;
+        for (const log of data) {
+          const estimated = Number(log.estimated_eta_minutes);
+          if (!Number.isFinite(estimated) || !log.predicted_arrival_time || !log.actual_arrival_time) {
+            continue;
+          }
+          const predicted = new Date(log.predicted_arrival_time).getTime();
+          const actual = new Date(log.actual_arrival_time).getTime();
+          if (Number.isNaN(predicted) || Number.isNaN(actual)) continue;
+
+          const bias = (predicted - actual) / 60_000;
+          if (!Number.isFinite(bias)) continue;
+          totalBias += bias;
+          count++;
+        }
+
+        if (count < 3) return 0;
+        return clampEtaBiasMinutes(totalBias / count);
+      } catch (error) {
+        console.error("[TruckService] Error calculating ETA bias:", error);
+        return 0;
       }
-      const predicted = new Date(log.predicted_arrival_time).getTime();
-      const actual = new Date(log.actual_arrival_time).getTime();
-      if (Number.isNaN(predicted) || Number.isNaN(actual)) continue;
-
-      // Positive bias => we usually arrive later than predicted (over-optimistic ETA).
-      // Bias unit: estimated_minutes - actual_elapsed_minutes-from-query is hard without created_at;
-      // use predicted vs actual clock difference in minutes instead.
-      const bias = (predicted - actual) / 60_000;
-      if (!Number.isFinite(bias)) continue;
-      totalBias += bias;
-      count++;
     }
-
-    if (count < 3) return 0;
-    return clampEtaBiasMinutes(totalBias / count);
-  } catch (error) {
-    console.error("[TruckService] Error calculating ETA bias:", error);
-    return 0;
-  }
+  );
+  return cached ?? 0;
 }
 
 async function getHistoricalArrivalSummary(
@@ -1945,53 +2009,59 @@ async function getHistoricalArrivalSummary(
   stopId: number,
   carType: "0" | "1"
 ): Promise<HistoricalArrivalSummary | undefined> {
-  try {
-    const db = getSupabaseClient();
-    const thirtyDaysAgo = new Date(
-      Date.now() - 30 * 24 * 60 * 60 * 1000
-    ).toISOString();
+  const cached = await getRedisBackedHistoricalCache(
+    HISTORICAL_ARRIVAL_CACHE_KEY(routeId, stopId, carType),
+    async () => {
+      try {
+        const db = getSupabaseClient();
+        const thirtyDaysAgo = new Date(
+          Date.now() - 30 * 24 * 60 * 60 * 1000
+        ).toISOString();
 
-    const { data, error } = await db
-      .from("eta_logs")
-      .select("actual_arrival_time")
-      .eq("route_id", routeId)
-      .eq("stop_id", stopId)
-      .eq("car_type", carType)
-      .not("actual_arrival_time", "is", null)
-      .gte("created_at", thirtyDaysAgo)
-      .order("created_at", { ascending: false })
-      .limit(60);
+        const { data, error } = await db
+          .from("eta_logs")
+          .select("actual_arrival_time")
+          .eq("route_id", routeId)
+          .eq("stop_id", stopId)
+          .eq("car_type", carType)
+          .not("actual_arrival_time", "is", null)
+          .gte("created_at", thirtyDaysAgo)
+          .order("created_at", { ascending: false })
+          .limit(60);
 
-    if (error || !data || data.length === 0) return undefined;
+        if (error || !data || data.length === 0) return null;
 
-    let totalMinutes = 0;
-    let count = 0;
+        let totalMinutes = 0;
+        let count = 0;
 
-    for (const log of data) {
-      if (!log.actual_arrival_time) continue;
-      const minutesOfDay = getTaiwanMinutesOfDayFromIso(log.actual_arrival_time);
-      if (minutesOfDay === null) continue;
-      totalMinutes += minutesOfDay;
-      count++;
+        for (const log of data) {
+          if (!log.actual_arrival_time) continue;
+          const minutesOfDay = getTaiwanMinutesOfDayFromIso(log.actual_arrival_time);
+          if (minutesOfDay === null) continue;
+          totalMinutes += minutesOfDay;
+          count++;
+        }
+
+        if (count < HISTORICAL_ARRIVAL_MIN_SAMPLES) return null;
+
+        const avgTotalMinutes = Math.round(totalMinutes / count);
+        const avgHours = Math.floor(avgTotalMinutes / 60);
+        const avgMins = avgTotalMinutes % 60;
+
+        return {
+          clockTime: `${avgHours.toString().padStart(2, "0")}:${avgMins
+            .toString()
+            .padStart(2, "0")}`,
+          minutesUntilNow: avgTotalMinutes - getTaiwanMinutesOfDay(),
+          sampleCount: count,
+        } satisfies HistoricalArrivalSummary;
+      } catch (e) {
+        console.error("[TruckService] Error calculating historical arrival summary:", e);
+        return null;
+      }
     }
-
-    if (count < HISTORICAL_ARRIVAL_MIN_SAMPLES) return undefined;
-
-    const avgTotalMinutes = Math.round(totalMinutes / count);
-    const avgHours = Math.floor(avgTotalMinutes / 60);
-    const avgMins = avgTotalMinutes % 60;
-
-    return {
-      clockTime: `${avgHours.toString().padStart(2, "0")}:${avgMins
-        .toString()
-        .padStart(2, "0")}`,
-      minutesUntilNow: avgTotalMinutes - getTaiwanMinutesOfDay(),
-      sampleCount: count,
-    };
-  } catch (e) {
-    console.error("[TruckService] Error calculating historical arrival summary:", e);
-    return undefined;
-  }
+  );
+  return cached ?? undefined;
 }
 
 // ── HCCG API sync ────────────────────────────────────────────
