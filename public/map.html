@@ -237,6 +237,7 @@
     const pathLat = parseFloat(params.get('pathLat'));
     const pathLng = parseFloat(params.get('pathLng'));
     const lockStop = params.get('lockStop') === '1';
+    const pageVersion = params.get('v') || '20260731-route-panel';
     const focusLat = parseFloat(params.get('sLat'));
     const focusLng = parseFloat(params.get('sLng'));
     const focusName = params.get('stop') || '';
@@ -375,6 +376,7 @@
       if (!routeId) return;
       try {
         const qs = new URLSearchParams({ routeId });
+        qs.set('v', pageVersion);
         if (routeName) qs.set('routeName', routeName);
         if (!isNaN(pathLat) && !isNaN(pathLng)) {
           qs.set('lat', String(pathLat));

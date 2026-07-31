@@ -2407,9 +2407,17 @@ export async function getRoutePathForMap(
   const excludeSeqs = [closest?.seq, focus?.seq].filter(
     (seq): seq is number => typeof seq === "number" && seq > 0
   );
+  const upcomingAnchorSeq =
+    focus?.seq ?? closest?.seq ?? truckData.garbage?.heading_to_stop_sequence ?? truckData.recycling?.heading_to_stop_sequence ?? 0;
   const upcomingStops =
     points.length > 0
-      ? await buildUpcomingRoutePoints(routeId, points, truckData, excludeSeqs)
+      ? await buildUpcomingRoutePoints(
+          routeId,
+          points,
+          truckData,
+          upcomingAnchorSeq,
+          excludeSeqs
+        )
       : [];
 
   // Downsample for Leaflet; always keep closest point
@@ -2583,18 +2591,16 @@ async function buildUpcomingRoutePoints(
   routeId: string,
   points: RoutePathPoint[],
   truckData: { garbage: TruckLiveData | null; recycling: TruckLiveData | null },
+  anchorSeq: number,
   excludeSeqs: number[] = []
 ): Promise<RouteEtaPoint[]> {
-  const truck = truckData.garbage ?? truckData.recycling;
-  if (!truck) return [];
-
   const excluded = new Set(excludeSeqs);
   const upcoming: RoutePathPoint[] = [];
   const seenSeqs = new Set<number>();
 
   for (const point of points) {
     const seq = point.seq ?? 0;
-    if (seq <= 0 || seq <= truck.heading_to_stop_sequence) continue;
+    if (seq <= 0 || seq <= anchorSeq) continue;
     if (excluded.has(seq) || seenSeqs.has(seq)) continue;
     seenSeqs.add(seq);
     upcoming.push(point);
