@@ -1,0 +1,25 @@
+name: Sync Trucks Cache
+
+# Vercel Hobby blocks sub-daily crons, so poll via GitHub Actions instead.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call sync-trucks cron
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "CRON_SECRET secret not set — skip sync cron"
+            exit 0
+          fi
+          curl -sS -f --max-time 60 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "https://ecotrack-hsinchu.vercel.app/api/cron/sync-trucks"
+          echo

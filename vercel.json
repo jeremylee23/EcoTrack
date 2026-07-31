@@ -1,10 +1,4 @@
 {
   "version": 2,
-  "cleanUrls": true,
-  "crons": [
-    {
-      "path": "/api/cron/sync-trucks",
-      "schedule": "*/5 * * * *"
-    }
-  ]
+  "cleanUrls": true
 }

@@ -33,6 +33,12 @@
 - `api/webhook.ts` 現在只負責驗簽、解包 request body、批次轉派事件與回傳 HTTP 結果
 - webhook HTTP 入口由 900+ 行降到約 60 行，後續要拆指令、補測試或改 reply 策略時，變更面會集中在 webhook 應用層模組
 
+## 6. 修正部署架構與平台限制衝突
+
+- 移除 `vercel.json` 中不相容 Hobby 方案的 5 分鐘 cron
+- 新增 `.github/workflows/sync-trucks.yml`，用 GitHub Actions 每 5 分鐘呼叫 `/api/cron/sync-trucks`
+- 這讓 production 部署不再被平台方案限制卡住，同時保留原本需要的高頻快取刷新能力
+
 ## 驗證
 
 - `npm run typecheck`
