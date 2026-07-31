@@ -542,6 +542,13 @@
               return (idx + 1) + '.' + stop.name + (stop.scheduledTime ? ' 表定' + stop.scheduledTime : ' 沿線等候');
             }).join(' ｜ ');
           }
+        } else {
+          var upcomingRowEmpty = document.getElementById('upcomingRow');
+          var upcomingElEmpty = document.getElementById('upcomingList');
+          if (upcomingRowEmpty && upcomingElEmpty) {
+            upcomingRowEmpty.style.display = 'flex';
+            upcomingElEmpty.textContent = '接下來 5 站：目前這一站已接近路線末端，後面沒有更多清運點。';
+          }
         }
 
         var tipRow = document.getElementById('routeTipRow');
