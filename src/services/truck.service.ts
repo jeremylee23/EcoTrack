@@ -2230,18 +2230,43 @@ export interface ClosestWaitPoint {
   statusLabel: string;
 }
 
+export interface RouteEtaPoint extends ClosestWaitPoint {
+  etaSource?: EtaSource;
+}
+
+export interface RouteLiveTruckPoint {
+  lat: number;
+  lng: number;
+  seq: number;
+  carNo?: string;
+  routeName?: string;
+  updatedAt: string;
+  carType: "0" | "1";
+}
+
 /**
  * Full collection route for map + the point on that route closest to home (wait here).
  */
 export async function getRoutePathForMap(
   routeId: string,
-  options: { nearLat?: number; nearLng?: number; routeName?: string } = {}
+  options: {
+    nearLat?: number;
+    nearLng?: number;
+    routeName?: string;
+    focusLat?: number;
+    focusLng?: number;
+    focusName?: string;
+  } = {}
 ): Promise<{
   routeId: string;
   routeName?: string;
   points: RoutePathPoint[];
   mode: "full" | "corridor" | "empty";
-  closest?: ClosestWaitPoint;
+  closest?: RouteEtaPoint;
+  focus?: RouteEtaPoint;
+  upcomingStops: RouteEtaPoint[];
+  liveGarbageTruck?: RouteLiveTruckPoint;
+  liveRecyclingTruck?: RouteLiveTruckPoint;
 }> {
   const redis = getRedis();
   const pointsCacheKey = `route_path_full_v2:${routeId}`;
@@ -2341,7 +2366,14 @@ export async function getRoutePathForMap(
   let mode: "full" | "corridor" | "empty" =
     points.length >= 2 ? "full" : "empty";
 
-  let closest: ClosestWaitPoint | undefined;
+  const truckData = points.length > 0
+    ? await loadLiveTrucksForRoute(routeId).catch((error) => {
+        console.error("[TruckService] route live-truck load failed:", error);
+        return { garbage: null, recycling: null };
+      })
+    : { garbage: null, recycling: null };
+
+  let closest: RouteEtaPoint | undefined;
   if (
     points.length > 0 &&
     options.nearLat !== undefined &&
@@ -2351,9 +2383,34 @@ export async function getRoutePathForMap(
       routeId,
       points,
       options.nearLat,
-      options.nearLng
+      options.nearLng,
+      truckData
     );
   }
+
+  let focus: RouteEtaPoint | undefined;
+  if (
+    points.length > 0 &&
+    options.focusLat !== undefined &&
+    options.focusLng !== undefined
+  ) {
+    focus = await buildFocusRoutePoint(
+      routeId,
+      points,
+      options.focusLat,
+      options.focusLng,
+      options.focusName,
+      truckData
+    );
+  }
+
+  const excludeSeqs = [closest?.seq, focus?.seq].filter(
+    (seq): seq is number => typeof seq === "number" && seq > 0
+  );
+  const upcomingStops =
+    points.length > 0
+      ? await buildUpcomingRoutePoints(routeId, points, truckData, excludeSeqs)
+      : [];
 
   // Downsample for Leaflet; always keep closest point
   let drawPoints = points;
@@ -2380,6 +2437,99 @@ export async function getRoutePathForMap(
     points: drawPoints,
     mode,
     closest,
+    focus,
+    upcomingStops,
+    liveGarbageTruck: toRouteLiveTruckPoint(truckData.garbage),
+    liveRecyclingTruck: toRouteLiveTruckPoint(truckData.recycling),
+  };
+}
+
+function toRouteLiveTruckPoint(
+  truck: TruckLiveData | null | undefined
+): RouteLiveTruckPoint | undefined {
+  if (!truck) return undefined;
+  return {
+    lat: truck.lat,
+    lng: truck.lng,
+    seq: truck.heading_to_stop_sequence,
+    carNo: truck.car_no,
+    routeName: truck.route_name,
+    updatedAt: truck.updated_at,
+    carType: truck.car_type === "1" ? "1" : "0",
+  };
+}
+
+async function buildRouteEtaPoint(
+  routeId: string,
+  point: RoutePathPoint,
+  truckData: { garbage: TruckLiveData | null; recycling: TruckLiveData | null },
+  options: { name?: string; distanceMeters?: number; address?: string } = {}
+): Promise<RouteEtaPoint> {
+  const seq = point.seq ?? 0;
+  const name = options.name || point.name || `路線序 ${seq || "?"}`;
+  let etaMinutes: number | undefined;
+  let etaSource: EtaSource | undefined;
+  let statusLabel = point.scheduledTime
+    ? `表定 ${point.scheduledTime}`
+    : "沿路線等候";
+
+  const truck = truckData.garbage ?? truckData.recycling;
+  if (truck && seq > 0) {
+    if (isSequencePastStop(truck.heading_to_stop_sequence, seq)) {
+      statusLabel = "此點可能已過，請看車頭方向沿線等";
+    } else {
+      etaMinutes = await estimateEtaFromTruckWithHistory(
+        routeId,
+        truck,
+        point.lat,
+        point.lng,
+        seq,
+        truck.car_type === "1" ? "1" : "0"
+      );
+      etaSource = "estimated";
+      statusLabel = `預估約 ${etaMinutes} 分鐘抵達此處`;
+    }
+  } else if (seq > 0) {
+    const preferredCarType = truckData.recycling && !truckData.garbage ? "1" : "0";
+    const historical =
+      (await getHistoricalArrivalSummary(routeId, seq, preferredCarType)) ??
+      (await getHistoricalArrivalSummary(
+        routeId,
+        seq,
+        preferredCarType === "0" ? "1" : "0"
+      ));
+
+    if (
+      historical &&
+      historical.minutesUntilNow >= 0 &&
+      historical.minutesUntilNow <= HISTORICAL_ETA_MAX_MINUTES
+    ) {
+      etaMinutes = historical.minutesUntilNow;
+      etaSource = "historical";
+      statusLabel = `歷史推估約 ${etaMinutes} 分鐘抵達此處`;
+    } else if (point.scheduledTime) {
+      const mins = getMinutesUntilScheduled(point.scheduledTime);
+      if (mins !== null && mins >= -SCHEDULE_LATE_GRACE_MINUTES) {
+        if (mins >= 0) {
+          statusLabel = `表定約 ${mins} 分鐘後（${point.scheduledTime}）`;
+        } else {
+          statusLabel = `表定 ${point.scheduledTime}（可能延誤中）`;
+        }
+      }
+    }
+  }
+
+  return {
+    lat: point.lat,
+    lng: point.lng,
+    seq,
+    name,
+    address: options.address,
+    scheduledTime: point.scheduledTime ?? null,
+    distanceMeters: options.distanceMeters ?? 0,
+    etaMinutes,
+    etaSource,
+    statusLabel,
   };
 }
 
@@ -2387,8 +2537,9 @@ async function buildClosestWaitPoint(
   routeId: string,
   points: RoutePathPoint[],
   userLat: number,
-  userLng: number
-): Promise<ClosestWaitPoint> {
+  userLng: number,
+  truckData: { garbage: TruckLiveData | null; recycling: TruckLiveData | null }
+): Promise<RouteEtaPoint> {
   let best = points[0];
   let bestDist = Number.POSITIVE_INFINITY;
   for (const p of points) {
@@ -2399,54 +2550,60 @@ async function buildClosestWaitPoint(
     }
   }
 
-  const seq = best.seq ?? 0;
-  const name = best.name || `路線序 ${seq || "?"}`;
-  let etaMinutes: number | undefined;
-  let statusLabel = best.scheduledTime
-    ? `表定 ${best.scheduledTime}`
-    : "沿路線等候";
+  return buildRouteEtaPoint(routeId, best, truckData, {
+    distanceMeters: Math.round(bestDist),
+  });
+}
 
-  try {
-    const truckData = await loadLiveTrucksForRoute(routeId);
-    const truck = truckData.garbage ?? truckData.recycling;
-    if (truck && seq > 0) {
-      if (isSequencePastStop(truck.heading_to_stop_sequence, seq)) {
-        statusLabel = "此點可能已過，請看車頭方向沿線等";
-      } else {
-        etaMinutes = await estimateEtaFromTruckWithHistory(
-          routeId,
-          truck,
-          best.lat,
-          best.lng,
-          seq,
-          truck.car_type === "1" ? "1" : "0"
-        );
-        statusLabel = `預估約 ${etaMinutes} 分鐘抵達此處`;
-      }
-    } else if (best.scheduledTime) {
-      const mins = getMinutesUntilScheduled(best.scheduledTime);
-      if (mins !== null && mins >= -SCHEDULE_LATE_GRACE_MINUTES) {
-        if (mins >= 0) {
-          statusLabel = `表定約 ${mins} 分鐘後（${best.scheduledTime}）`;
-        } else {
-          statusLabel = `表定 ${best.scheduledTime}（可能延誤中）`;
-        }
-      }
+async function buildFocusRoutePoint(
+  routeId: string,
+  points: RoutePathPoint[],
+  focusLat: number,
+  focusLng: number,
+  focusName: string | undefined,
+  truckData: { garbage: TruckLiveData | null; recycling: TruckLiveData | null }
+): Promise<RouteEtaPoint> {
+  let best = points[0];
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const p of points) {
+    const d = haversineDistance(focusLat, focusLng, p.lat, p.lng) * 1000;
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
     }
-  } catch (err) {
-    console.error("[TruckService] closest wait ETA failed:", err);
   }
 
-  return {
-    lat: best.lat,
-    lng: best.lng,
-    seq,
-    name,
-    scheduledTime: best.scheduledTime ?? null,
+  return buildRouteEtaPoint(routeId, best, truckData, {
+    name: focusName || best.name,
     distanceMeters: Math.round(bestDist),
-    etaMinutes,
-    statusLabel,
-  };
+  });
+}
+
+async function buildUpcomingRoutePoints(
+  routeId: string,
+  points: RoutePathPoint[],
+  truckData: { garbage: TruckLiveData | null; recycling: TruckLiveData | null },
+  excludeSeqs: number[] = []
+): Promise<RouteEtaPoint[]> {
+  const truck = truckData.garbage ?? truckData.recycling;
+  if (!truck) return [];
+
+  const excluded = new Set(excludeSeqs);
+  const upcoming: RoutePathPoint[] = [];
+  const seenSeqs = new Set<number>();
+
+  for (const point of points) {
+    const seq = point.seq ?? 0;
+    if (seq <= 0 || seq <= truck.heading_to_stop_sequence) continue;
+    if (excluded.has(seq) || seenSeqs.has(seq)) continue;
+    seenSeqs.add(seq);
+    upcoming.push(point);
+    if (upcoming.length >= 5) break;
+  }
+
+  return Promise.all(
+    upcoming.map((point) => buildRouteEtaPoint(routeId, point, truckData))
+  );
 }
 
 /** Load all HCCG clean points for one route (cached). */

@@ -141,6 +141,32 @@
       padding: 0 8px;
       white-space: nowrap;
     }
+    .focus-icon {
+      background: #fef2f2;
+      border: 3px solid #dc2626;
+      border-radius: 16px;
+      text-align: center;
+      line-height: 28px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #991b1b;
+      box-shadow: 0 2px 8px rgba(220, 38, 38, 0.28);
+      padding: 0 8px;
+      white-space: nowrap;
+    }
+    .upcoming-icon {
+      background: #dbeafe;
+      border: 2px solid #2563eb;
+      border-radius: 14px;
+      text-align: center;
+      line-height: 24px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #1d4ed8;
+      box-shadow: 0 1px 4px rgba(37, 99, 235, 0.28);
+      padding: 0 7px;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -159,6 +185,18 @@
     <div class="info-row" id="routeTipRow" style="display:none; color:#1e40af; font-size:13px; line-height:1.45;">
       <span>🛣️</span>
       <span id="routeTip">藍線＝完整路線；橘點＝離你家最近、建議等候處</span>
+    </div>
+    <div class="info-row" id="focusEtaRow" style="display:none; color:#991b1b; font-size:13px; line-height:1.45;">
+      <span>🚩</span>
+      <span id="focusEta">目前看的點：計算中</span>
+    </div>
+    <div class="info-row" id="homeEtaRow" style="display:none; color:#9a3412; font-size:13px; line-height:1.45;">
+      <span>🏠</span>
+      <span id="homeEta">定位最近點：計算中</span>
+    </div>
+    <div class="info-row" id="upcomingRow" style="display:none; color:#1d4ed8; font-size:13px; line-height:1.45;">
+      <span>🕒</span>
+      <span id="upcomingList">接下來 5 站：計算中</span>
     </div>
   </div>
 
@@ -199,6 +237,20 @@
     const pathLat = parseFloat(params.get('pathLat'));
     const pathLng = parseFloat(params.get('pathLng'));
     const lockStop = params.get('lockStop') === '1';
+    const focusLat = parseFloat(params.get('sLat'));
+    const focusLng = parseFloat(params.get('sLng'));
+    const focusName = params.get('stop') || '';
+
+    function formatEtaLabel(prefix, point) {
+      if (!point) return prefix + '暫無資料';
+      if (point.etaMinutes != null) {
+        return prefix + point.name + '｜約 ' + point.etaMinutes + ' 分';
+      }
+      if (point.scheduledTime) {
+        return prefix + point.name + '｜表定 ' + point.scheduledTime;
+      }
+      return prefix + point.name + '｜沿線等候';
+    }
 
     // 2. Setup map
     const map = L.map('map', {
@@ -331,6 +383,13 @@
           qs.set('lat', String(uLat));
           qs.set('lng', String(uLng));
         }
+        if (!isNaN(focusLat) && !isNaN(focusLng)) {
+          qs.set('focusLat', String(focusLat));
+          qs.set('focusLng', String(focusLng));
+        }
+        if (focusName) {
+          qs.set('focusName', focusName);
+        }
         const res = await fetch('/api/route-path?' + qs.toString());
         if (!res.ok) return;
         const data = await res.json();
@@ -349,7 +408,29 @@
           (data.routeName || routeName || '清運路線') + '（完整路線）'
         );
 
+        if (data.liveGarbageTruck && !isNaN(data.liveGarbageTruck.lat) && !isNaN(data.liveGarbageTruck.lng)) {
+          L.marker([data.liveGarbageTruck.lat, data.liveGarbageTruck.lng], { icon: truckIcon, zIndexOffset: 900 })
+            .addTo(map)
+            .bindPopup(
+              '<b>垃圾車即時位置</b><br/>' +
+              (data.liveGarbageTruck.carNo || '未知車牌') + '<br/>' +
+              '序號 ' + (data.liveGarbageTruck.seq || '?')
+            );
+        }
+
+        if (data.liveRecyclingTruck && !isNaN(data.liveRecyclingTruck.lat) && !isNaN(data.liveRecyclingTruck.lng)) {
+          L.marker([data.liveRecyclingTruck.lat, data.liveRecyclingTruck.lng], { icon: recycleIcon, zIndexOffset: 850 })
+            .addTo(map)
+            .bindPopup(
+              '<b>回收車即時位置</b><br/>' +
+              (data.liveRecyclingTruck.carNo || '未知車牌') + '<br/>' +
+              '序號 ' + (data.liveRecyclingTruck.seq || '?')
+            );
+        }
+
         var closest = data.closest;
+        var focus = data.focus;
+        var upcomingStops = Array.isArray(data.upcomingStops) ? data.upcomingStops : [];
         // If Flex/ETA already chose a recommend pin (sLat/sLng), KEEP IT.
         // Do not let route-path "nearest on polyline" override into an alley.
         if (lockStop && !isNaN(sLat) && !isNaN(sLng)) {
@@ -357,10 +438,34 @@
           var tipElLocked = document.getElementById('routeTip');
           if (tipRowLocked && tipElLocked) {
             tipRowLocked.style.display = 'flex';
-            tipElLocked.textContent =
-              '藍線＝完整路線；紅旗＝訊息建議等候處（與卡片同步，不會改推巷弄）';
+            tipElLocked.textContent = data.tip ||
+              '藍線＝完整路線；🚛＝垃圾車即時位置；紅旗＝你目前看的點；橘標＝定位最近點；藍標＝接下來 5 站';
           }
-          return;
+        }
+
+        if (focus && !isNaN(focus.lat) && !isNaN(focus.lng)) {
+          var focusLabel = focus.etaMinutes != null
+            ? ('這裡 · 約' + focus.etaMinutes + '分')
+            : '這裡';
+          var focusIcon = L.divIcon({
+            className: 'focus-icon',
+            html: focusLabel,
+            iconSize: [120, 32],
+            iconAnchor: [60, 16]
+          });
+          L.marker([focus.lat, focus.lng], { icon: focusIcon, zIndexOffset: 1000 })
+            .addTo(map)
+            .bindPopup(
+              '<b>你目前看的清運點</b><br/>' +
+              (focus.name || focusName || '目前清運點') + '<br/>' +
+              (focus.statusLabel || '')
+            );
+          var focusRow = document.getElementById('focusEtaRow');
+          var focusEl = document.getElementById('focusEta');
+          if (focusRow && focusEl) {
+            focusRow.style.display = 'flex';
+            focusEl.textContent = formatEtaLabel('目前看的點：', focus);
+          }
         }
 
         if (closest && !isNaN(closest.lat) && !isNaN(closest.lng)) {
@@ -382,6 +487,13 @@
               (closest.statusLabel || '')
             );
 
+          var homeRow = document.getElementById('homeEtaRow');
+          var homeEl = document.getElementById('homeEta');
+          if (homeRow && homeEl) {
+            homeRow.style.display = 'flex';
+            homeEl.textContent = formatEtaLabel('定位最近點：', closest);
+          }
+
           document.getElementById('stopName').textContent =
             '建議等：' + (closest.name || '路線最近點') +
             '（' + closest.distanceMeters + 'm）';
@@ -393,6 +505,40 @@
             badge.textContent = closest.scheduledTime
               ? ('表定 ' + closest.scheduledTime)
               : '沿線等候';
+          }
+        }
+
+        if (upcomingStops.length > 0) {
+          upcomingStops.forEach(function (stop, idx) {
+            if (isNaN(stop.lat) || isNaN(stop.lng)) return;
+            var label = stop.etaMinutes != null
+              ? ('下' + (idx + 1) + ' · ' + stop.etaMinutes + '分')
+              : ('下' + (idx + 1));
+            var icon = L.divIcon({
+              className: 'upcoming-icon',
+              html: label,
+              iconSize: [82, 28],
+              iconAnchor: [41, 14]
+            });
+            L.marker([stop.lat, stop.lng], { icon: icon, zIndexOffset: 700 - idx })
+              .addTo(map)
+              .bindPopup(
+                '<b>接下來第 ' + (idx + 1) + ' 站</b><br/>' +
+                (stop.name || '清運點') + '<br/>' +
+                (stop.statusLabel || '')
+              );
+          });
+
+          var upcomingRow = document.getElementById('upcomingRow');
+          var upcomingEl = document.getElementById('upcomingList');
+          if (upcomingRow && upcomingEl) {
+            upcomingRow.style.display = 'flex';
+            upcomingEl.textContent = '接下來 5 站：' + upcomingStops.map(function (stop, idx) {
+              if (stop.etaMinutes != null) {
+                return (idx + 1) + '.' + stop.name + ' 約' + stop.etaMinutes + '分';
+              }
+              return (idx + 1) + '.' + stop.name + (stop.scheduledTime ? ' 表定' + stop.scheduledTime : ' 沿線等候');
+            }).join(' ｜ ');
           }
         }
 

@@ -39,18 +39,38 @@ export default async function handler(
     req.query.lng !== undefined ? parseFloat(String(req.query.lng)) : undefined;
   const routeName =
     typeof req.query.routeName === "string" ? req.query.routeName : undefined;
+  const focusLat =
+    req.query.focusLat !== undefined
+      ? parseFloat(String(req.query.focusLat))
+      : undefined;
+  const focusLng =
+    req.query.focusLng !== undefined
+      ? parseFloat(String(req.query.focusLng))
+      : undefined;
+  const focusName =
+    typeof req.query.focusName === "string" ? req.query.focusName : undefined;
 
   try {
     const path = await getRoutePathForMap(routeId, {
       nearLat: Number.isFinite(lat) ? lat : undefined,
       nearLng: Number.isFinite(lng) ? lng : undefined,
       routeName,
+      focusLat: Number.isFinite(focusLat) ? focusLat : undefined,
+      focusLng: Number.isFinite(focusLng) ? focusLng : undefined,
+      focusName,
     });
 
     const closest = path.closest;
-    const tip = closest
-      ? `藍線＝完整清運路線。橘色「在這等」＝離你家最近的路點（約 ${closest.distanceMeters}m）。${closest.statusLabel}`
-      : "藍線＝垃圾車完整清運路線。往線附近等即可（沿路收，不一定要有旗子）。";
+    const tipParts = ["藍線＝完整清運路線"];
+    if (path.liveGarbageTruck) tipParts.push("🚛＝垃圾車即時 GPS");
+    if (path.focus) tipParts.push("紅旗＝你目前看的清運點");
+    if (closest) {
+      tipParts.push(
+        `橘標＝離你定位最近的等候點（約 ${closest.distanceMeters}m）`
+      );
+    }
+    if (path.upcomingStops.length > 0) tipParts.push("藍標＝接下來 5 站 ETA");
+    const tip = tipParts.join("；") + "。";
 
     res.status(200).json({
       ...path,
