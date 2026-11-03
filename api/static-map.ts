@@ -17,6 +17,19 @@ const OUT_W = 800;
 const OUT_H = 420;
 const UA =
   "EcoTrack/1.0 (https://ecotrack-hsinchu.vercel.app; LINE Bot map preview)";
+/** OSM tile usage policy asks caches to retain tiles at least 7 days. */
+const TILE_CACHE_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * CARTO Voyager (`*.basemaps.cartocdn.com/rastertiles/voyager`) now responds
+ * HTTP 200 with an "API KEY REQUIRED" watermark PNG. These standard OSM
+ * raster tiles need no key and are allowed for this low-traffic preview
+ * when https://operations.osmfoundation.org/policies/tiles/ is followed:
+ * exact host, identifying User-Agent, Referer, and a visible credit.
+ */
+function osmTileUrl(z: number, x: number, y: number): string {
+  return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+}
 
 function latLngToWorld(
   lat: number,
@@ -37,12 +50,31 @@ async function fetchTile(
   x: number,
   y: number
 ): Promise<Buffer> {
-  const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`;
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  if (!res.ok) {
-    throw new Error(`tile ${z}/${x}/${y} failed: ${res.status}`);
+  const url = osmTileUrl(z, x, y);
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Referer: "https://ecotrack-hsinchu.vercel.app/",
+      Accept: "image/png",
+    },
+  });
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!res.ok || !contentType.includes("image/")) {
+    throw new Error(
+      `tile ${z}/${x}/${y} failed: ${res.status} ${contentType || "no content-type"}`
+    );
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+/** LINE Flex shows this PNG with no Leaflet credit, so bake the licence in. */
+function attributionSvg(): Buffer {
+  return Buffer.from(`
+    <svg width="${OUT_W}" height="${OUT_H}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="${OUT_H - 28}" width="${OUT_W}" height="28" fill="rgba(255,255,255,0.9)"/>
+      <text x="16" y="${OUT_H - 9}" font-family="DejaVu Sans, Liberation Sans, Nimbus Sans, sans-serif" font-size="15" fill="#1f2937">&#169; OpenStreetMap contributors</text>
+    </svg>
+  `);
 }
 
 function pinSvg(): Buffer {
@@ -62,7 +94,7 @@ export default async function handler(
   applyCors(res, ["GET"]);
   res.setHeader(
     "Cache-Control",
-    "public, s-maxage=86400, stale-while-revalidate=604800"
+    `public, s-maxage=${TILE_CACHE_SECONDS}, stale-while-revalidate=${TILE_CACHE_SECONDS}`
   );
 
   if (handleOptions(req, res)) return;
@@ -128,6 +160,7 @@ export default async function handler(
           left: Math.round(OUT_W / 2 - 24),
           top: Math.round(OUT_H / 2 - 56),
         },
+        { input: attributionSvg(), left: 0, top: 0 },
       ])
       .png()
       .toBuffer();

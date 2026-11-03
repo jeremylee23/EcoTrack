@@ -167,6 +167,18 @@
       padding: 0 7px;
       white-space: nowrap;
     }
+
+    /* Leaflet zeroes attribution margin so a bottom corner credit sits
+       flush. The status card covers that corner on phones, so the credit
+       lives top-left and needs its own inset. */
+    .leaflet-control-attribution {
+      margin: 8px 0 0 8px !important;
+      font-size: 11px;
+      line-height: 1.35;
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 6px;
+      max-width: calc(100vw - 72px);
+    }
   </style>
 </head>
 <body>
@@ -255,13 +267,20 @@
 
     // 2. Setup map
     const map = L.map('map', {
-      zoomControl: false // hide default zoom
+      zoomControl: false, // hide default zoom
+      attributionControl: false
     });
     
     L.control.zoom({ position: 'topright' }).addTo(map);
+    // Attribution control must exist before the tile layer adds its credit.
+    L.control.attribution({ position: 'topleft' }).addTo(map);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors',
+    // CARTO Voyager (basemaps.cartocdn.com) now returns an "API KEY REQUIRED"
+    // watermark unless a paid key is set. OSM standard tiles are keyless.
+    // Policy: https://operations.osmfoundation.org/policies/tiles/
+    // Exact URL, no {s} subdomain and no {r} retina suffix.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19
     }).addTo(map);
 
