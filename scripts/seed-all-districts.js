@@ -1,4 +1,5 @@
 const { Client } = require("pg");
+require("dotenv").config();
 
 async function fetchAllStops() {
   console.log("Fetching all districts data from HCCG...");
@@ -14,12 +15,16 @@ async function fetchAllStops() {
 }
 
 async function run() {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    console.error("Missing DATABASE_URL");
+    process.exit(1);
+  }
+
   const points = await fetchAllStops();
   console.log(`Fetched ${points.length} points.`);
 
-  const client = new Client(
-    "postgresql://postgres:3z3g6ZVpeLOBFR8f@db.xsytkncomjcypfesxsbw.supabase.co:5432/postgres"
-  );
+  const client = new Client(connectionString);
 
   try {
     await client.connect();
