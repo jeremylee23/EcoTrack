@@ -1,8 +1,14 @@
 const fs = require('fs');
 const { Client } = require('pg');
+require('dotenv').config();
 
 async function run() {
-  const client = new Client("postgresql://postgres:3z3g6ZVpeLOBFR8f@db.xsytkncomjcypfesxsbw.supabase.co:5432/postgres");
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    console.error('Missing DATABASE_URL');
+    process.exit(1);
+  }
+  const client = new Client(connectionString);
   try {
     await client.connect();
     const sql = fs.readFileSync('supabase/migrations/002_eta_logs.sql', 'utf8');
